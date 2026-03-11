@@ -3,7 +3,7 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""Package containing task implementations for various robotic environments."""
+"""Package containing experimental task implementations for various robotic environments."""
 
 import os
 import toml
