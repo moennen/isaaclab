@@ -3,7 +3,10 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-from isaaclab_assets.robots.franka import FRANKA_PANDA_CFG
+from isaaclab_newton.physics import MJWarpSolverCfg, NewtonCfg
+from isaaclab_physx.physics import PhysxCfg
+
+from isaaclab_assets.robots.franka import FRANKA_PANDA_HIGH_PD_CFG
 
 from isaaclab.assets import ArticulationCfg
 from isaaclab.envs import DirectRLEnvCfg
@@ -11,37 +14,59 @@ from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sim import SimulationCfg
 from isaaclab.utils import configclass
 
+from isaaclab_tasks.utils import PresetCfg
+
+
+@configclass
+class DonglaixTestPhysicsCfg(PresetCfg):
+    physx: PhysxCfg = PhysxCfg()
+    default: NewtonCfg = NewtonCfg(
+        solver_cfg=MJWarpSolverCfg(
+            njmax=20,
+            nconmax=20,
+            ls_iterations=20,
+            cone="pyramidal",
+            impratio=1,
+            ls_parallel=False,
+            integrator="implicitfast",
+        ),
+        num_substeps=1,
+        debug_mode=False,
+        use_cuda_graph=True,
+    )
+    newton: NewtonCfg = default
+
 
 @configclass
 class DonglaixTestEnvCfg(DirectRLEnvCfg):
     # env
     decimation = 2
     episode_length_s = 5.0
-    # - spaces definition: 7 joint pos + 7 joint vel = 14 obs, 7 arm actions
+    # 7 arm joint pos + 7 arm joint vel = 14 obs, 7 arm actions
     action_space = 7
     observation_space = 14
     state_space = 0
 
     # simulation
-    sim: SimulationCfg = SimulationCfg(dt=1 / 120, render_interval=decimation)
+    sim: SimulationCfg = SimulationCfg(dt=1 / 120, render_interval=decimation, physics=DonglaixTestPhysicsCfg())
 
-    # robot
-    robot_cfg: ArticulationCfg = FRANKA_PANDA_CFG.replace(prim_path="/World/envs/env_.*/Robot")
+    # robot — HIGH_PD_CFG: stiffness=400, damping=80, disable_gravity=True for stable control
+    robot_cfg: ArticulationCfg = FRANKA_PANDA_HIGH_PD_CFG.replace(prim_path="/World/envs/env_.*/Robot")
 
     # scene
     scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=4096, env_spacing=4.0, replicate_physics=True)
 
-    # joint names to control (7 arm joints)
-    arm_joint_names = ["panda_joint.*"]
+    # joint names to control (7 arm joints, excluding fingers)
+    arm_joint_names = ["panda_joint[1-7]"]
 
-    # action scale (scales position targets relative to default pose)
-    action_scale = 0.5  # [rad]
+    # action scale — position offset from default pose [rad]
+    action_scale = 0.5
 
     # reward scales
     rew_scale_alive = 1.0
     rew_scale_terminated = -2.0
-    rew_scale_joint_pos = -0.1   # penalize deviation from default pose
-    rew_scale_joint_vel = -0.01  # penalize fast motion
+    rew_scale_joint_pos = -0.1
+    rew_scale_joint_vel = -0.01
 
-    # reset: joint position noise range around default [rad]
+    # reset noise range [rad]
     initial_joint_pos_noise = 0.2

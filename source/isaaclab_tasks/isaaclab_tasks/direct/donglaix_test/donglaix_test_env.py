@@ -25,11 +25,11 @@ class DonglaixTestEnv(DirectRLEnv):
     def __init__(self, cfg: DonglaixTestEnvCfg, render_mode: str | None = None, **kwargs):
         super().__init__(cfg, render_mode, **kwargs)
 
-        _, _, self._arm_joint_idx = self.robot.find_joints(self.cfg.arm_joint_names)
+        self._arm_joint_idx, _ = self.robot.find_joints(self.cfg.arm_joint_names)
+        self._default_joint_pos = wp.to_torch(self.robot.data.default_joint_pos).clone()
 
         self.joint_pos = wp.to_torch(self.robot.data.joint_pos)
         self.joint_vel = wp.to_torch(self.robot.data.joint_vel)
-        self.default_joint_pos = wp.to_torch(self.robot.data.default_joint_pos).clone()
 
     def _setup_scene(self):
         self.robot = Articulation(self.cfg.robot_cfg)
@@ -45,9 +45,8 @@ class DonglaixTestEnv(DirectRLEnv):
         self.actions = actions.clone()
 
     def _apply_action(self) -> None:
-        # Apply joint position targets offset from default pose
-        targets = self.default_joint_pos[:, self._arm_joint_idx] + self.actions * self.cfg.action_scale
-        self.robot.set_joint_position_target(targets, joint_ids=self._arm_joint_idx)
+        targets = self._default_joint_pos[:, self._arm_joint_idx] + self.actions * self.cfg.action_scale
+        self.robot.set_joint_position_target_index(target=targets, joint_ids=self._arm_joint_idx)
 
     def _get_observations(self) -> dict:
         obs = torch.cat(
@@ -60,7 +59,7 @@ class DonglaixTestEnv(DirectRLEnv):
         return {"policy": obs}
 
     def _get_rewards(self) -> torch.Tensor:
-        joint_pos_dev = self.joint_pos[:, self._arm_joint_idx] - self.default_joint_pos[:, self._arm_joint_idx]
+        joint_pos_dev = self.joint_pos[:, self._arm_joint_idx] - self._default_joint_pos[:, self._arm_joint_idx]
         rew_alive = self.cfg.rew_scale_alive * (1.0 - self.reset_terminated.float())
         rew_terminated = self.cfg.rew_scale_terminated * self.reset_terminated.float()
         rew_joint_pos = self.cfg.rew_scale_joint_pos * torch.sum(torch.square(joint_pos_dev), dim=-1)
@@ -72,7 +71,7 @@ class DonglaixTestEnv(DirectRLEnv):
         self.joint_vel = wp.to_torch(self.robot.data.joint_vel)
 
         time_out = self.episode_length_buf >= self.max_episode_length - 1
-        terminated = torch.zeros_like(time_out)  # franka is fixed-base, no fall termination
+        terminated = torch.zeros_like(time_out)
         return terminated, time_out
 
     def _reset_idx(self, env_ids: Sequence[int] | None):
@@ -80,6 +79,7 @@ class DonglaixTestEnv(DirectRLEnv):
             env_ids = self.robot._ALL_INDICES
         super()._reset_idx(env_ids)
 
+        # Joint state with noise around default
         joint_pos = wp.to_torch(self.robot.data.default_joint_pos)[env_ids].clone()
         joint_pos[:, self._arm_joint_idx] += sample_uniform(
             -self.cfg.initial_joint_pos_noise,
@@ -89,12 +89,17 @@ class DonglaixTestEnv(DirectRLEnv):
         )
         joint_vel = wp.to_torch(self.robot.data.default_joint_vel)[env_ids].clone()
 
-        default_root_state = wp.to_torch(self.robot.data.default_root_state)[env_ids].clone()
-        default_root_state[:, :3] += self.scene.env_origins[env_ids]
+        # Root pose — use non-deprecated API (default_root_pose / default_root_vel)
+        default_root_pose = wp.to_torch(self.robot.data.default_root_pose)[env_ids].clone()
+        default_root_pose[:, :3] += self.scene.env_origins[env_ids]
+        default_root_vel = wp.to_torch(self.robot.data.default_root_vel)[env_ids].clone()
 
+        # Update cached views so observations/rewards see the reset state immediately
         self.joint_pos[env_ids] = joint_pos
         self.joint_vel[env_ids] = joint_vel
 
-        self.robot.write_root_pose_to_sim(default_root_state[:, :7], env_ids)
-        self.robot.write_root_velocity_to_sim(default_root_state[:, 7:], env_ids)
-        self.robot.write_joint_state_to_sim(joint_pos, joint_vel, None, env_ids)
+        # Write to simulation
+        self.robot.write_root_pose_to_sim_index(root_pose=default_root_pose, env_ids=env_ids)
+        self.robot.write_root_velocity_to_sim_index(root_velocity=default_root_vel, env_ids=env_ids)
+        self.robot.write_joint_position_to_sim_index(position=joint_pos, env_ids=env_ids)
+        self.robot.write_joint_velocity_to_sim_index(velocity=joint_vel, env_ids=env_ids)

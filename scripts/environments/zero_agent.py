@@ -21,6 +21,7 @@ parser.add_argument(
 )
 parser.add_argument("--num_envs", type=int, default=None, help="Number of environments to simulate.")
 parser.add_argument("--task", type=str, default=None, help="Name of the task.")
+parser.add_argument("--pause_on_start", action="store_true", default=False, help="Start with physics paused.")
 # append AppLauncher cli args
 add_launcher_args(parser)
 # parse the arguments
@@ -60,11 +61,17 @@ def main():
         # keep running while any visualizer is open, otherwise fall back to MAX_STEPS
         sim = env.unwrapped.sim
         actions = torch.zeros(env.action_space.shape, device=env.unwrapped.device)
+        if args_cli.pause_on_start:
+            sim.pause()
         while True:
             if sim.visualizers:
                 # visualizer mode: run until the visualizer window is closed
                 if not any(v.is_running() and not v.is_closed for v in sim.visualizers):
                     break
+                # if any visualizer is paused, render (blocks until GUI play is clicked)
+                if any(v.is_running() and not v.is_closed and v.is_training_paused() for v in sim.visualizers):
+                    sim.render()
+                    continue
             # run everything in inference mode
             with torch.inference_mode():
                 # apply actions
