@@ -3,7 +3,6 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-from isaaclab_newton.physics import MJWarpSolverCfg, NewtonCfg
 from isaaclab_physx.physics import PhysxCfg
 
 from isaaclab.assets import ArticulationCfg
@@ -18,6 +17,7 @@ from isaaclab_assets.robots import KUKA_ALLEGRO_CFG
 
 from ... import dexsuite_env_cfg as dexsuite
 from ... import mdp
+from .physic.newton import Dexsuite3dgNewtonCfg
 from .camera_cfg import (
     BaseTiledCameraCfg,
     DuoCameraObservationsCfg,
@@ -33,32 +33,17 @@ FINGER_SENSORS = [f"{name}_object_s" for name in FINGERTIP_LIST if name != "thum
 
 @configclass
 class KukaAllegroPhysicsCfg(PresetCfg):
-    default = PhysxCfg(
+    """Physics presets for Kuka Allegro Dexsuite 3dg. Default is Newton (extended manager)."""
+
+    default = Dexsuite3dgNewtonCfg()
+    newton = default
+    physx = PhysxCfg(
         bounce_threshold_velocity=0.01,
         gpu_max_rigid_patch_count=4 * 5 * 2**15,
         gpu_found_lost_pairs_capacity=2**26,
         gpu_found_lost_aggregate_pairs_capacity=2**29,
         gpu_total_aggregate_pairs_capacity=2**25,
     )
-    newton = NewtonCfg(
-        solver_cfg=MJWarpSolverCfg(
-            solver="newton",
-            integrator="implicitfast",
-            njmax=300,
-            nconmax=70,
-            impratio=10.0,
-            cone="elliptic",
-            update_data_interval=2,
-            iterations=100,
-            ls_iterations=15,
-            ls_parallel=False,
-            use_mujoco_contacts=True,
-            ccd_iterations=5000,
-        ),
-        num_substeps=2,
-        debug_mode=False,
-    )
-    physx = default
 
 
 @configclass
@@ -136,13 +121,15 @@ class KukaAllegroObservationCfg(PresetCfg):
 
 @configclass
 class KukaAllegroEventCfg(PresetCfg):
+    """Event presets. Default/newton use reset-only events; physx adds startup domain randomization."""
+
     @configclass
     class KukaAllegroPhysxEventCfg(dexsuite.StartupEventCfg, dexsuite.EventCfg):
         pass
 
-    default = KukaAllegroPhysxEventCfg()
-    newton = dexsuite.EventCfg()
-    physx = default
+    default = dexsuite.EventCfg()
+    newton = default
+    physx = KukaAllegroPhysxEventCfg()
 
 
 @configclass

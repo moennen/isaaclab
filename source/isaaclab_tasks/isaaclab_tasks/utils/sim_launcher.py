@@ -67,8 +67,14 @@ def _scan_config(cfg, predicates: list[Callable[[Any], bool]]) -> list[bool]:
 
 
 def _is_newton_physics(node) -> bool:
-    """True when the node is a Newton physics config (Kit is not required)."""
-    return isinstance(node, PhysicsCfg) and type(node).__name__ == "NewtonCfg"
+    """True when the node is a Newton physics config (Kit is not required).
+
+    Accepts NewtonCfg and any subclass (e.g. Dexsuite3dgNewtonCfg) so that
+    experimental tasks using an extended Newton config are recognized as Newton-only.
+    """
+    if not isinstance(node, PhysicsCfg):
+        return False
+    return any(c.__name__ == "NewtonCfg" for c in type(node).__mro__)
 
 
 def _get_visualizer_types(launcher_args: argparse.Namespace | dict | None) -> set[str]:

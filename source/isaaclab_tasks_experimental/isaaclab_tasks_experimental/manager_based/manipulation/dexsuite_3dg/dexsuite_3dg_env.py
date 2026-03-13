@@ -37,19 +37,27 @@ def _require_newton_3dg(cfg) -> None:
         return
     logger.error(
         "Dexsuite 3dg tasks (Isaac-Dexsuite-3dg-Kuka-Allegro-*) require Newton physics. "
-        "Use presets=newton (e.g. presets=newton,cube). PhysX is not supported for this task."
+        "Default is Newton; do not use presets=physx for this task."
     )
     raise ValueError(
-        "Dexsuite 3dg tasks require presets=newton. "
-        "Use e.g. --task=Isaac-Dexsuite-3dg-Kuka-Allegro-Lift-v0 presets=newton,cube"
+        "Dexsuite 3dg tasks require Newton physics (default). "
+        "Use e.g. --task=Isaac-Dexsuite-3dg-Kuka-Allegro-Lift-v0 or presets=newton,cube"
     )
 
 
 def _apply_newton_manager_patch_for_3dg(cfg) -> None:
-    """If physics is our extended Newton manager, patch the module so assets see it."""
+    """If physics is our extended Newton manager, patch the module so assets see it.
+
+    Patch both isaaclab_newton.physics and isaaclab_newton.physics.newton_manager so that
+    all consumers (assets, sensors, env events like randomize_physics_scene_gravity) use
+    Dexsuite3dgNewtonManager and thus see the initialized model.
+    """
     if not _is_newton_3dg_physics(cfg):
         return
     _newton_physics.NewtonManager = Dexsuite3dgNewtonManager
+    import isaaclab_newton.physics.newton_manager as _newton_manager_module
+
+    _newton_manager_module.NewtonManager = Dexsuite3dgNewtonManager
 
 
 class Dexsuite3dgManagerBasedRLEnv(ManagerBasedRLEnv):
@@ -57,7 +65,7 @@ class Dexsuite3dgManagerBasedRLEnv(ManagerBasedRLEnv):
 
     Patches ``isaaclab_newton.physics.NewtonManager`` to the extended manager before
     the simulation context is created, so all Newton assets use the same class.
-    Raises if run with PhysX; use presets=newton for this task.
+    Default physics is Newton; PhysX is not supported for this task.
     """
 
     def __init__(self, cfg, **kwargs):
