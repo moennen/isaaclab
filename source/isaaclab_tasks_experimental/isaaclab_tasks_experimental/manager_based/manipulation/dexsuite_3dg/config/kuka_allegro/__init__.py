@@ -5,11 +5,17 @@
 
 """
 Dextra Kuka Allegro environments.
+
+Uses :class:`Dexsuite3dgManagerBasedRLEnv` so the extended Newton manager is patched
+when running with default (Newton) physics.
 """
 
 import gymnasium as gym
 
 from . import agents
+
+# Env class that patches NewtonManager to Dexsuite3dgNewtonManager (from .physic.newton)
+_DEXSUITE_3DG_ENV = f"{__name__.rsplit('.config', 1)[0]}.dexsuite_3dg_env:Dexsuite3dgManagerBasedRLEnv"
 
 ##
 # Register Gym environments.
@@ -18,7 +24,7 @@ from . import agents
 # State Observation
 gym.register(
     id="Isaac-Dexsuite-3dg-Kuka-Allegro-Reorient-v0",
-    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    entry_point=_DEXSUITE_3DG_ENV,
     disable_env_checker=True,
     kwargs={
         "env_cfg_entry_point": f"{__name__}.dexsuite_kuka_allegro_env_cfg:Dexsuite3dgKukaAllegroReorientEnvCfg",
@@ -29,7 +35,7 @@ gym.register(
 
 gym.register(
     id="Isaac-Dexsuite-3dg-Kuka-Allegro-Reorient-Play-v0",
-    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    entry_point=_DEXSUITE_3DG_ENV,
     disable_env_checker=True,
     kwargs={
         "env_cfg_entry_point": f"{__name__}.dexsuite_kuka_allegro_env_cfg:Dexsuite3dgKukaAllegroReorientEnvCfg_PLAY",
@@ -41,7 +47,7 @@ gym.register(
 # Dexsuite 3dg Lift Environments
 gym.register(
     id="Isaac-Dexsuite-3dg-Kuka-Allegro-Lift-v0",
-    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    entry_point=_DEXSUITE_3DG_ENV,
     disable_env_checker=True,
     kwargs={
         "env_cfg_entry_point": f"{__name__}.dexsuite_kuka_allegro_env_cfg:Dexsuite3dgKukaAllegroLiftEnvCfg",
@@ -53,7 +59,7 @@ gym.register(
 
 gym.register(
     id="Isaac-Dexsuite-3dg-Kuka-Allegro-Lift-Play-v0",
-    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    entry_point=_DEXSUITE_3DG_ENV,
     disable_env_checker=True,
     kwargs={
         "env_cfg_entry_point": f"{__name__}.dexsuite_kuka_allegro_env_cfg:Dexsuite3dgKukaAllegroLiftEnvCfg_PLAY",
