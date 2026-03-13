@@ -404,9 +404,11 @@ Each step below includes: **Feature**, **Tests (task `test/` folder)**, **How to
 ### Step 2: Rigid proto from USD excluding Object
 
 - **Scope:** New helper under `config/kuka_allegro/physic/newton/` (e.g. `dexsuite_3dg_builder_utils.py`).
-- **Goal:** Build a **Newton ModelBuilder** (rigid only) for **one** env that contains all task scene elements (e.g. Robot, table, ground) **without** the Object prim.
+- **Goal:** Build a **Newton ModelBuilder** (rigid only) for **one** env containing **per-env** scene elements (e.g. Robot, table) **without** the Object prim. Global content (e.g. ground plane) is **not** included in the proto.
 - **Inputs:** USD stage, env root path (e.g. `/World/envs/env_0`), object relative path (e.g. `Object`).
-- **Behavior:** Build proto by adding USD for all scene elements in the env (e.g. `add_usd(stage, root_path=env_path/Robot)`, table, ground, and any other task prims); Object never included.
+- **Behavior:** Build proto by adding USD only for prims **under the env** (e.g. `add_usd(stage, root_path=env_path/Robot)`, table, etc.); Object never included. **Do not** add global content (e.g. GroundPlane) in this proto.
+
+**Shared vs per-env (multi-env):** The existing Newton cloner and manager add **global** content (e.g. ground plane) **once** to the main builder; the **proto** is per-env only and is added per world with an env-specific xform. The Step 2 helper therefore returns a **per-env-only** proto. Step 3 (single-env) and Step 4 (multi-env) must add global content (e.g. `add_ground_plane()` or `add_usd(stage, ignore_paths=[...env paths...])`) **once** when assembling the SimplicitsModelBuilder; then they add the Step 2 proto per world. This avoids duplicating the ground plane (or other shared prims) across envs.
 
 **Relationship to current NewtonManager:** The current NewtonManager already builds the model from USD: the cloner (`newton_physics_replicate`) builds a **proto per env** with `add_usd(stage, root_path=env_path)`, so the proto includes all env prims (e.g. Robot, Object, table; ground is added globally). The Object is therefore a **rigid body** in the Newton model today. For the Simplicits path we need the **same** rigid content (all task scene elements except Object) but **without** the Object, because the Object will be added as a **Simplicits** object (from mesh, Step 1), not as a rigid body from USD. We cannot reuse the existing cloner’s builder as-is: it would give us the Object twice (rigid from USD + Simplicits) or we would have to remove it after the fact. So Step 2 is “build from USD like the current manager, but **omit the Object prim**” so that the only representation of the object in the combined model is the Simplicits one.
 
