@@ -336,7 +336,7 @@ flowchart TB
 - **Physics (Newton + Kaolin):**
   - `config/kuka_allegro/physic/newton/` — existing; extend manager/cfg (including Simplicits enable flag and reference to Simplicits params).
   - `config/kuka_allegro/physic/kaolin/` — **new**: Kaolin-only helpers (create rigid Simplicits object **from a mesh**); minimal, semantic API; no hardcoded shapes. **Simplicits parameters** (material, sampling, collision) are defined in a **config** in this folder (or nested in the Newton cfg) so they sit **alongside all other task parameters** (see below).
-- **Tests:** `tests/` — **new**: all tests for the Simplicits integration are **local to the task** under `source/isaaclab_tasks_experimental/.../dexsuite_3dg/tests/`. Run with `./isaaclab.sh -p -m pytest source/isaaclab_tasks_experimental/.../dexsuite_3dg/tests/ ...` (or the project’s equivalent). No Simplicits tests in `isaaclab_newton` or outside the task folder.
+- **Tests:** `test/` — **new**: all tests for the Simplicits integration are **local to the task** under `source/isaaclab_tasks_experimental/.../dexsuite_3dg/test/`. Run with `./isaaclab.sh -p -m pytest source/isaaclab_tasks_experimental/.../dexsuite_3dg/test/ ...` (or the project’s equivalent). No Simplicits tests in `isaaclab_newton` or outside the task folder.
 - **Profiling:** Optional instrumentation (see Section 6) can live in the manager or a small `profiling_utils` under `physic/`.
 - **Docs:** `docs/SIMPLICITS_INTEGRATION_PLAN.md` (this file).
 
@@ -351,9 +351,9 @@ All Simplicits-specific parameters must be defined in a **config alongside other
 
 ### 5.1 Testing policy
 
-- **Location:** All tests for this integration live in the task **`tests/`** folder (see File layout above). No Simplicits-specific tests in `isaaclab_newton` or elsewhere.
+- **Location:** All tests for this integration live in the task **`test/`** folder (see File layout above). No Simplicits-specific tests in `isaaclab_newton` or elsewhere.
 - **Test-first:** For each step, **write tests before implementation**. Tests define the expected behavior and feature coverage for that step.
-- **Pass after implementation:** Implementation is done when the tests for that step **pass**. Run tests with the project’s runner (e.g. `./isaaclab.sh -p -m pytest .../dexsuite_3dg/tests/`).
+- **Pass after implementation:** Implementation is done when the tests for that step **pass**. Run tests with the project’s runner (e.g. `./isaaclab.sh -p -m pytest .../dexsuite_3dg/test/`).
 - **Full feature coverage:** Tests must **cover all features** of the step. A feature that is not covered by tests is **not considered working**; we **cannot continue to the next step** until every feature of the current step is covered by tests and those tests pass. If a step has multiple features, each must have at least one test (or test case) that asserts it; add tests for any missing coverage before proceeding.
 
 ---
@@ -371,9 +371,9 @@ All Simplicits-specific parameters must be defined in a **config alongside other
 
 ## 7. Testable steps (incremental)
 
-Each step below includes: **Feature**, **Tests (task `tests/` folder)**, **How to test**, and **Debugging capabilities**.
+Each step below includes: **Feature**, **Tests (task `test/` folder)**, **How to test**, and **Debugging capabilities**.
 
-**Workflow per step:** (1) **Write tests first** in the task `tests/` folder, covering every feature of the step. (2) Implement the step. (3) Run the tests; they must **pass**. (4) Confirm **all features are covered** by tests; if any feature has no test, add the test and ensure it passes. (5) **Integration gate:** Run play.py in the supported configuration(s) for this step (see Section 2.1); it must run without crash. Unsupported configs must raise a **clear, actionable error**, not a raw traceback. (6) Only then **proceed to the next step**. A feature without a passing test is not done; do not continue until coverage is complete, tests pass, and play.py is runnable (or fails clearly) as per Section 2.1.
+**Workflow per step:** (1) **Write tests first** in the task `test/` folder, covering every feature of the step. (2) Implement the step. (3) Run the tests; they must **pass**. (4) Confirm **all features are covered** by tests; if any feature has no test, add the test and ensure it passes. (5) **Integration gate:** Run play.py in the supported configuration(s) for this step (see Section 2.1); it must run without crash. Unsupported configs must raise a **clear, actionable error**, not a raw traceback. (6) Only then **proceed to the next step**. A feature without a passing test is not done; do not continue until coverage is complete, tests pass, and play.py is runnable (or fails clearly) as per Section 2.1.
 
 ---
 
@@ -385,10 +385,10 @@ Each step below includes: **Feature**, **Tests (task `tests/` folder)**, **How t
 
 **Feature:** Enables creation of rigid Simplicits objects from the **spawned object's mesh**; any spawner that produces mesh geometry works; Kaolin API confined to one module; no hardcoding outside the usual IsaacLab pipeline.
 
-**Tests (task `tests/` folder):** Write tests **before** implementation. Place under e.g. `tests/physic/kaolin/` or `tests/test_kaolin_factory.py`. Tests must cover: (1) mesh in → rigid SimplicitsObject out with expected attributes (point positions, masses, rigid handle); (2) mesh from file (e.g. `.obj`) or synthetic vertices/faces; (3) device handling (e.g. CUDA_VISIBLE_DEVICES). Optional: mesh from USD via IsaacLab utils. Do not proceed to Step 2 until all tests pass and every feature above is covered.
+**Tests (task `test/` folder):** Write tests **before** implementation. Place under e.g. `test/physic/kaolin/` or `test/test_kaolin_factory.py`. Tests must cover: (1) mesh in → rigid SimplicitsObject out with expected attributes (point positions, masses, rigid handle); (2) mesh from file (e.g. `.obj`) or synthetic vertices/faces; (3) device handling (e.g. CUDA_VISIBLE_DEVICES). Optional: mesh from USD via IsaacLab utils. Do not proceed to Step 2 until all tests pass and every feature above is covered.
 
 **How to test:**
-- Run: `./isaaclab.sh -p -m pytest .../dexsuite_3dg/tests/ -k "step1 or kaolin or factory"` (or the test module for this step). All must pass.
+- Run: `./isaaclab.sh -p -m pytest .../dexsuite_3dg/test/ -k "step1 or kaolin or factory"` (or the test module for this step). All must pass.
 - Standalone script or pytest: (1) provide a small mesh (e.g. cube vertices/faces or load from a `.obj`), call the factory, assert it returns a rigid SimplicitsObject with expected attributes (point positions, masses, rigid handle). (2) Optional: use IsaacLab mesh utils to create trimesh from a USD prim, then call the factory with that mesh; no errors. No full IsaacLab scene or Newton required for the factory itself.
 - Can run with `CUDA_VISIBLE_DEVICES=0` or `1` to ensure device handling is correct.
 
@@ -412,10 +412,10 @@ Each step below includes: **Feature**, **Tests (task `tests/` folder)**, **How t
 
 **Feature:** Allows building the rigid scene (all task scene elements except Object) so that the Simplicits builder can add only the object as Simplicits.
 
-**Tests (task `tests/` folder):** Write tests **before** implementation. Place under e.g. `tests/physic/newton/` or `tests/test_builder_utils.py`. Tests must cover: (1) build proto from minimal stage (env with Robot, Table, Object, global GroundPlane); (2) body/articulation counts match expectations; (3) no body corresponds to the Object prim. Do not proceed to Step 3 until all tests pass and every feature is covered.
+**Tests (task `test/` folder):** Write tests **before** implementation. Place under e.g. `test/physic/newton/` or `test/test_builder_utils.py`. Tests must cover: (1) build proto from minimal stage (env with Robot, Table, Object, global GroundPlane); (2) body/articulation counts match expectations; (3) no body corresponds to the Object prim. Do not proceed to Step 3 until all tests pass and every feature is covered.
 
 **How to test:**
-- Run: `./isaaclab.sh -p -m pytest .../dexsuite_3dg/tests/ -k "step2 or builder_utils or proto"`. All must pass.
+- Run: `./isaaclab.sh -p -m pytest .../dexsuite_3dg/test/ -k "step2 or builder_utils or proto"`. All must pass.
 - Unit test with a minimal stage (env with Robot, Table, Object, global GroundPlane). Build proto with the helper; assert body/articulation counts match expectations and no body corresponds to the Object prim.
 - Optional: run the **validation play command** with simplicits still **disabled** and confirm behavior unchanged (sanity check that this helper is not used yet in the default path).
 
@@ -436,10 +436,10 @@ Each step below includes: **Feature**, **Tests (task `tests/` folder)**, **How t
 
 **Feature:** Single-env Simplicits + rigid scene builds and one step runs; validates full Kaolin+Newton pipeline in isolation.
 
-**Tests (task `tests/` folder):** Write tests **before** implementation. Place under e.g. `tests/test_simplicits_assembly.py`. Tests must cover: (1) build SimplicitsModelBuilder (rigid proto + one Simplicits object from mesh), finalize; (2) create state, run one SimplicitsSolver.step (and optionally one rigid step); no crash; (3) state arrays (e.g. `particle_q`) update. Do not proceed to Step 4 until all tests pass and every feature is covered.
+**Tests (task `test/` folder):** Write tests **before** implementation. Place under e.g. `tests/test_simplicits_assembly.py`. Tests must cover: (1) build SimplicitsModelBuilder (rigid proto + one Simplicits object from mesh), finalize; (2) create state, run one SimplicitsSolver.step (and optionally one rigid step); no crash; (3) state arrays (e.g. `particle_q`) update. Do not proceed to Step 4 until all tests pass and every feature is covered.
 
 **How to test:**
-- Run: `./isaaclab.sh -p -m pytest .../dexsuite_3dg/tests/ -k "step3 or assembly or single_env"`. All must pass.
+- Run: `./isaaclab.sh -p -m pytest .../dexsuite_3dg/test/ -k "step3 or assembly or single_env"`. All must pass.
 - Build the model, create state, run one **SimplicitsSolver.step** and optionally one rigid-body step (using the same solver type as the task, e.g. MuJoCo, for consistency); no crash; state arrays (e.g. `particle_q`) update. No env cloning.
 - Can be a pytest or a small script run with `./isaaclab.sh -p script.py` (or equivalent) that exits 0 on success.
 
@@ -460,10 +460,10 @@ Each step below includes: **Feature**, **Tests (task `tests/` folder)**, **How t
 
 **Feature:** Multi-env structure matches what will be injected in the manager; validates N-env build and step; ensures env isolation (no cross-env interaction).
 
-**Tests (task `tests/` folder):** Write tests **before** implementation. Place under e.g. `tests/test_simplicits_multi_env.py`. Tests must cover: (1) build for N=2 or N=4, finalize, run one full step (rigid + Simplicits); particle state shape and all envs advance; (2) per-env particle ranges available (e.g. from `particle_world_start`) for pose adapter and reset; (3) isolation: each env’s object moves independently; no cross-env contacts (assert or log world IDs if needed). Do not proceed to Step 5 until all tests pass and every feature is covered.
+**Tests (task `test/` folder):** Write tests **before** implementation. Place under e.g. `tests/test_simplicits_multi_env.py`. Tests must cover: (1) build for N=2 or N=4, finalize, run one full step (rigid + Simplicits); particle state shape and all envs advance; (2) per-env particle ranges available (e.g. from `particle_world_start`) for pose adapter and reset; (3) isolation: each env’s object moves independently; no cross-env contacts (assert or log world IDs if needed). Do not proceed to Step 5 until all tests pass and every feature is covered.
 
 **How to test:**
-- Run: `./isaaclab.sh -p -m pytest .../dexsuite_3dg/tests/ -k "step4 or multi_env"`. All must pass.
+- Run: `./isaaclab.sh -p -m pytest .../dexsuite_3dg/test/ -k "step4 or multi_env"`. All must pass.
 - Build for N=2 or N=4, finalize, run one full step (rigid + Simplicits); check particle state shape and that all envs advance. Verify **per-env particle ranges** (e.g. from `particle_world_start`) so pose adapter and reset can index correctly. No manager yet.
 - **Isolation:** Run a few steps with N=2; confirm each env’s object moves independently (e.g. same initial height → same fall; or different initial poses → different trajectories). No cross-env contacts (Newton collision uses world IDs; if in doubt, log or assert world IDs of contact pairs).
 - Later: run **validation play command** with `--num_envs 4` and simplicits **enabled** (once Step 5 is done) to stress multi-env.
@@ -484,10 +484,10 @@ Each step below includes: **Feature**, **Tests (task `tests/` folder)**, **How t
 
 **Feature:** With flag on, the task uses Simplicits for the object and two-phase stepping; with flag off, behavior unchanged. Enables running the **validation play command** with simplicits on.
 
-**Tests (task `tests/` folder):** Write tests **before** implementation. Place under e.g. `tests/test_manager_simplicits.py`. Tests must cover: (1) flag off: validation play command runs, behavior identical to current (rigid object); no regression; (2) flag on: validation command with `--num_envs 1` and `presets=cube` runs without crash; simulation steps; `get_model()` returns a SimplicitsModel; rigid scene moves; (3) optional: run 100–200 steps and assert stability. Do not proceed to Step 6 until all tests pass and every feature is covered.
+**Tests (task `test/` folder):** Write tests **before** implementation. Place under e.g. `tests/test_manager_simplicits.py`. Tests must cover: (1) flag off: validation play command runs, behavior identical to current (rigid object); no regression; (2) flag on: validation command with `--num_envs 1` and `presets=cube` runs without crash; simulation steps; `get_model()` returns a SimplicitsModel; rigid scene moves; (3) optional: run 100–200 steps and assert stability. Do not proceed to Step 6 until all tests pass and every feature is covered.
 
 **How to test:**
-- Run: `./isaaclab.sh -p -m pytest .../dexsuite_3dg/tests/ -k "step5 or manager"`. Then run validation command (flag off and on) as integration check.
+- Run: `./isaaclab.sh -p -m pytest .../dexsuite_3dg/test/ -k "step5 or manager"`. Then run validation command (flag off and on) as integration check.
 - **Flag off:** Run validation command; behavior identical to current (rigid object). No regression.
 - **Flag on:** Run validation command with `--num_envs 1` and `presets=cube`; no crash; simulation steps; `get_model()` returns a SimplicitsModel; rigid scene (e.g. robot, table) moves correctly. Optionally run for 100–200 steps and check object pose (via Step 6 adapter) is reasonable.
 - Use **validation command** as the primary integration test for this step (and later steps).
@@ -510,10 +510,10 @@ Each step below includes: **Feature**, **Tests (task `tests/` folder)**, **How t
 
 **Feature:** MDP and pretrained policies see the same observation/action/reward interface; only the data source (Simplicits state) changes internally.
 
-**Tests (task `tests/` folder):** Write tests **before** implementation. Place under e.g. `tests/test_object_pose_adapter.py` or extend manager/pose tests. Tests must cover: (1) with simplicits on, object pose from adapter (e.g. CoM) exposed via same interface as rigid (`root_pos_w`, `root_quat_w`); (2) validation command with pretrained policy: same observation/action shape, no crash; (3) short episode: rewards/observations/terminations using object pose do not crash; object position in valid range; no NaNs; (4) Kit/RTX path (if applicable): Object prim transform written to Fabric. Do not proceed to Step 7 until all tests pass and every feature is covered.
+**Tests (task `test/` folder):** Write tests **before** implementation. Place under e.g. `tests/test_object_pose_adapter.py` or extend manager/pose tests. Tests must cover: (1) with simplicits on, object pose from adapter (e.g. CoM) exposed via same interface as rigid (`root_pos_w`, `root_quat_w`); (2) validation command with pretrained policy: same observation/action shape, no crash; (3) short episode: rewards/observations/terminations using object pose do not crash; object position in valid range; no NaNs; (4) Kit/RTX path (if applicable): Object prim transform written to Fabric. Do not proceed to Step 7 until all tests pass and every feature is covered.
 
 **How to test:**
-- Run: `./isaaclab.sh -p -m pytest .../dexsuite_3dg/tests/ -k "step6 or pose or adapter or mdp"`. Then validation command with pretrained policy.
+- Run: `./isaaclab.sh -p -m pytest .../dexsuite_3dg/test/ -k "step6 or pose or adapter or mdp"`. Then validation command with pretrained policy.
 - **Compatibility:** With simplicits **on**, run **validation command** and load a **pretrained policy** (trained with current rigid object). Policy should run without error; observations and actions have same shape and semantics. Optionally compare first few observation vectors (with simplicits off vs on, same policy) to see small numerical differences only (object pose from CoM vs rigid body).
 - **Correctness:** Short episode (e.g. 100 steps); reward terms and observation terms that use object pose do not crash; object position stays near table height after settling; no NaNs.
 - **Regression:** Run validation command with simplicits off, record object pose over 50 steps; run with simplicits on and same policy, record object pose; both should be in the same workspace and similar scale.
@@ -534,10 +534,10 @@ Each step below includes: **Feature**, **Tests (task `tests/` folder)**, **How t
 
 **Feature:** Training and evaluation can reset envs correctly; object reappears at spawn pose each episode.
 
-**Tests (task `tests/` folder):** Write tests **before** implementation. Place under e.g. `tests/test_simplicits_reset.py`. Tests must cover: (1) reset a subset of env_ids; Simplicits particle positions for those envs match spawn pose (within tolerance), velocities zero; other envs unchanged; (2) integration: validation command with simplicits on, trigger reset; object returns to spawn pose (via adapter or state); (3) multi-episode: 2–3 episodes, object pose at start of each episode correct. Do not proceed to Step 8 until all tests pass and every feature is covered.
+**Tests (task `test/` folder):** Write tests **before** implementation. Place under e.g. `tests/test_simplicits_reset.py`. Tests must cover: (1) reset a subset of env_ids; Simplicits particle positions for those envs match spawn pose (within tolerance), velocities zero; other envs unchanged; (2) integration: validation command with simplicits on, trigger reset; object returns to spawn pose (via adapter or state); (3) multi-episode: 2–3 episodes, object pose at start of each episode correct. Do not proceed to Step 8 until all tests pass and every feature is covered.
 
 **How to test:**
-- Run: `./isaaclab.sh -p -m pytest .../dexsuite_3dg/tests/ -k "step7 or reset"`. Then validation command with resets.
+- Run: `./isaaclab.sh -p -m pytest .../dexsuite_3dg/test/ -k "step7 or reset"`. Then validation command with resets.
 - Unit test: reset a subset of envs; assert Simplicits particle positions for those envs match the configured spawn pose (within tolerance) and velocities are zero.
 - Integration: run **validation command** with simplicits on; trigger reset (e.g. end of episode or manual); confirm object returns to spawn pose visually or via adapter pose.
 - Run play for 2–3 episodes and check object pose at start of each episode is correct.
@@ -560,10 +560,10 @@ Each step below includes: **Feature**, **Tests (task `tests/` folder)**, **How t
 
 **Feature:** Confidence that Simplicits path is production-ready and that we can profile it when needed. **Integration gate:** At the end of Step 8, play.py runs for 500 steps with simplicits off and on; unsupported configs still report clear errors (Section 2.1).
 
-**Tests (task `tests/` folder):** Write tests **before** implementation. Place under e.g. `tests/test_simplicits_regression.py`. Tests must cover: (1) validation command with simplicits **off** for 500 steps: no crash; baseline metrics (e.g. mean object height, contact count) recorded; (2) validation command with simplicits **on** for 500 steps: no crash; metrics in same ballpark (object on table, contacts present); (3) regression: run 50 steps with simplicits on; object height in valid range; no NaNs; (4) optional: profiling enabled, 100 steps, timings logged. Do not consider Step 8 complete until all tests pass and every feature is covered.
+**Tests (task `test/` folder):** Write tests **before** implementation. Place under e.g. `tests/test_simplicits_regression.py`. Tests must cover: (1) validation command with simplicits **off** for 500 steps: no crash; baseline metrics (e.g. mean object height, contact count) recorded; (2) validation command with simplicits **on** for 500 steps: no crash; metrics in same ballpark (object on table, contacts present); (3) regression: run 50 steps with simplicits on; object height in valid range; no NaNs; (4) optional: profiling enabled, 100 steps, timings logged. Do not consider Step 8 complete until all tests pass and every feature is covered.
 
 **How to test:**
-- Run: `./isaaclab.sh -p -m pytest .../dexsuite_3dg/tests/` (full task test suite). All must pass. Then run validation command for 500 steps off/on.
+- Run: `./isaaclab.sh -p -m pytest .../dexsuite_3dg/test/` (full task test suite). All must pass. Then run validation command for 500 steps off/on.
 - Run **validation command** with simplicits **off** for 500 steps; no crash; baseline metrics (e.g. mean object height, contact count) recorded.
 - Run **validation command** with simplicits **on** for 500 steps; no crash; same metrics in same ballpark (object on table, contacts present).
 - Optional: minimal regression test (e.g. pytest) that runs 50 steps with simplicits on and checks object height in valid range and no NaNs; can be run in CI.
@@ -616,7 +616,7 @@ Each step below includes: **Feature**, **Tests (task `tests/` folder)**, **How t
 
 ## 10. Order of implementation and review
 
-For each step: **feature** (how it changes what happens when running the play test) and **validation** (how we confirm it works). **Tests live in the task `tests/` folder** (Section 5.1). For each step: write tests first (covering all features), then implement; do not proceed to the next step until tests pass and every feature is covered.
+For each step: **feature** (how it changes what happens when running the play test) and **validation** (how we confirm it works). **Tests live in the task `test/` folder** (Section 5.1). For each step: write tests first (covering all features), then implement; do not proceed to the next step until tests pass and every feature is covered.
 
 1. **Step 1 — Kaolin adapter (mesh → rigid Simplicits, spawner-driven)**
    - **Feature:** Adds a mesh-based factory to create a rigid Simplicits object. Play test is **unchanged** at this step (factory is not yet used in the sim path); it only adds code under `physic/kaolin/` that will later turn the spawned object’s mesh into a Simplicits object.
@@ -650,4 +650,4 @@ For each step: **feature** (how it changes what happens when running the play te
    - **Feature:** Optional profiling instrumentation (timers for build, step phases, reset) and a clear regression baseline. Play test: **unchanged** behavior; with profiling enabled, we can measure Simplicits path cost; with regression test, we catch future breakage.
    - **Validation:** Play 500 steps with simplicits **off** (baseline); play 500 steps with simplicits **on** (no crash; metrics in same ballpark). Optional pytest: 50 steps with simplicits on, object height in range, no NaNs. Profiling: enable flag/env, run 100 steps, inspect timings (and optionally nsys/PyTorch profiler).
 
-Each step is testable in isolation and can be reviewed before the next. Run the **task test suite** (`./isaaclab.sh -p -m pytest .../dexsuite_3dg/tests/`) after each step; the **validation command** (Section 2) should be used to validate Steps 5–8 against the current implementation and to ensure pretrained policies still work. **play.py must always run (or fail with a clear error)** in the supported configuration for that step (Section 2.1); this intermediate integration avoids a single "big bang" at Step 8 and keeps the pipeline testable early.
+Each step is testable in isolation and can be reviewed before the next. Run the **task test suite** (`./isaaclab.sh -p -m pytest .../dexsuite_3dg/test/`) after each step; the **validation command** (Section 2) should be used to validate Steps 5–8 against the current implementation and to ensure pretrained policies still work. **play.py must always run (or fail with a clear error)** in the supported configuration for that step (Section 2.1); this intermediate integration avoids a single "big bang" at Step 8 and keeps the pipeline testable early.
