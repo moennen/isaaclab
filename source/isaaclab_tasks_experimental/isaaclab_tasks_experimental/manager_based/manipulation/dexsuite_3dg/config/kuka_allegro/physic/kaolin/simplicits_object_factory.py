@@ -1,3 +1,8 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 # Copyright (c) 2022-2026, The Isaac Lab Project Developers.
 # SPDX-License-Identifier: BSD-3-Clause
 
@@ -13,24 +18,6 @@ import torch
 from .simplicits_cfg import SimplicitsObjectCfg
 
 logger = logging.getLogger("dexsuite_3dg.kaolin.factory")
-
-# Kaolin is optional; import at call time so task runs without Kaolin when simplicits disabled
-_SimplicitsObject: Any = None
-
-
-def _get_simplicits_object():
-    global _SimplicitsObject
-    if _SimplicitsObject is None:
-        try:
-            from kaolin.physics.simplicits import SimplicitsObject as _SO
-
-            _SimplicitsObject = _SO
-        except ImportError as e:
-            raise ImportError(
-                "Kaolin is required for Simplicits object creation. "
-                "Install kaolin or set simplicits_enabled=False."
-            ) from e
-    return _SimplicitsObject
 
 
 def create_rigid_simplicits_object_from_mesh(
@@ -58,6 +45,13 @@ def create_rigid_simplicits_object_from_mesh(
     Returns:
         A rigid SimplicitsObject (Kaolin) with num_handles == 1.
     """
+    try:
+        from kaolin.physics.simplicits import SimplicitsObject
+    except ImportError as e:
+        raise ImportError(
+            "Kaolin is required for Simplicits object creation. Install kaolin or set simplicits_enabled=False."
+        ) from e
+
     if device is None:
         device = vertices.device if isinstance(vertices, torch.Tensor) else "cuda:0"
     device = torch.device(device) if isinstance(device, str) else device
@@ -100,7 +94,6 @@ def create_rigid_simplicits_object_from_mesh(
     rhos = torch.full((n,), cfg.density, device=device, dtype=dtype)
     appx_vol_t = torch.tensor([appx_vol], device=device, dtype=dtype)
 
-    SimplicitsObject = _get_simplicits_object()
     obj = SimplicitsObject.create_rigid(pts, yms, prs, rhos, appx_vol_t)
 
     if verbose:

@@ -1,15 +1,18 @@
-# Copyright (c) 2022-2026, The Isaac Lab Project Developers.
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
 # SPDX-License-Identifier: BSD-3-Clause
 
 """Step 2 tests: build rigid proto from USD excluding Object prim."""
 
 from __future__ import annotations
 
-import pytest
-
 from pxr import Usd, UsdGeom
 
-from ....config.kuka_allegro.physic.newton import build_rigid_proto_excluding_object
+from ....config.kuka_allegro.physic.newton import (
+    build_rigid_proto_excluding_object,
+    get_builder_body_articulation_labels,
+)
 
 
 def _minimal_stage_with_env_and_object() -> Usd.Stage:
@@ -17,9 +20,9 @@ def _minimal_stage_with_env_and_object() -> Usd.Stage:
     stage = Usd.Stage.CreateInMemory()
     assert stage is not None, "CreateInMemory failed"
     UsdGeom.SetStageUpAxis(stage, UsdGeom.Tokens.z)
-    world = stage.DefinePrim("/World", "Xform")
-    envs = stage.DefinePrim("/World/envs", "Xform")
-    env0 = stage.DefinePrim("/World/envs/env_0", "Xform")
+    stage.DefinePrim("/World", "Xform")
+    stage.DefinePrim("/World/envs", "Xform")
+    stage.DefinePrim("/World/envs/env_0", "Xform")
     stage.DefinePrim("/World/envs/env_0/Robot", "Xform")
     stage.DefinePrim("/World/envs/env_0/table", "Xform")
     stage.DefinePrim("/World/envs/env_0/Object", "Xform")
@@ -54,15 +57,10 @@ class TestBuildRigidProtoExcludingObject:
             object_relative_path="Object",
         )
 
-        body_labels = getattr(builder, "body_label", None) or getattr(
-            builder, "body_key", None
-        )
-        if body_labels is not None:
-            for label in body_labels:
-                assert label != object_path, f"Object prim must not be in proto: {label}"
-                assert not label.startswith(
-                    object_path + "/"
-                ), f"Object subtree must not be in proto: {label}"
+        body_labels, _ = get_builder_body_articulation_labels(builder)
+        for label in body_labels:
+            assert label != object_path, f"Object prim must not be in proto: {label}"
+            assert not label.startswith(object_path + "/"), f"Object subtree must not be in proto: {label}"
 
     def test_build_from_minimal_stage_body_articulation_counts(self):
         """Build proto from minimal stage; body/articulation counts are consistent (no crash)."""
@@ -73,13 +71,8 @@ class TestBuildRigidProtoExcludingObject:
             object_relative_path="Object",
         )
 
-        body_labels = getattr(builder, "body_label", None) or getattr(
-            builder, "body_key", None
-        )
-        art_labels = getattr(builder, "articulation_label", None) or getattr(
-            builder, "articulation_key", None
-        )
-        n_bodies = len(body_labels) if body_labels is not None else 0
-        n_arts = len(art_labels) if art_labels is not None else 0
+        body_labels, art_labels = get_builder_body_articulation_labels(builder)
+        n_bodies = len(body_labels)
+        n_arts = len(art_labels)
         # Minimal stage may have 0 bodies if no physics schemas; just ensure no error
         assert n_bodies >= 0 and n_arts >= 0

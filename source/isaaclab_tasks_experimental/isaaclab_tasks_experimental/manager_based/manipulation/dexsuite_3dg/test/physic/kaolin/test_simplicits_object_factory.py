@@ -1,3 +1,8 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 # Copyright (c) 2022-2026, The Isaac Lab Project Developers.
 # SPDX-License-Identifier: BSD-3-Clause
 
@@ -66,9 +71,7 @@ class TestSimplicitsObjectFactory:
         vertices, faces = _cube_mesh(device, torch.float32)
         cfg = SimplicitsObjectCfg(num_samples=500)
 
-        obj = create_rigid_simplicits_object_from_mesh(
-            vertices, faces, cfg, device=device
-        )
+        obj = create_rigid_simplicits_object_from_mesh(vertices, faces, cfg, device=device)
 
         assert isinstance(obj, SimplicitsObject)
         assert obj.num_handles == 1
@@ -79,9 +82,7 @@ class TestSimplicitsObjectFactory:
         vertices, faces = _cube_mesh(device, torch.float32)
         cfg = SimplicitsObjectCfg(num_samples=200, density=400.0)
 
-        obj = create_rigid_simplicits_object_from_mesh(
-            vertices, faces, cfg, device=device
-        )
+        obj = create_rigid_simplicits_object_from_mesh(vertices, faces, cfg, device=device)
 
         assert obj.num_handles == 1
         assert obj.pts.shape[0] == cfg.num_samples
@@ -93,9 +94,7 @@ class TestSimplicitsObjectFactory:
         vertices, faces = _cube_mesh(device, torch.float32)
         cfg = SimplicitsObjectCfg(num_samples=100)
 
-        obj = create_rigid_simplicits_object_from_mesh(
-            vertices, faces, cfg, device=device
-        )
+        obj = create_rigid_simplicits_object_from_mesh(vertices, faces, cfg, device=device)
 
         assert obj.num_handles == 1
 
@@ -106,9 +105,7 @@ class TestSimplicitsObjectFactory:
         vertices, faces = _cube_mesh(device, torch.float32)
         cfg = SimplicitsObjectCfg(num_samples=100)
 
-        obj = create_rigid_simplicits_object_from_mesh(
-            vertices, faces, cfg, device=device
-        )
+        obj = create_rigid_simplicits_object_from_mesh(vertices, faces, cfg, device=device)
 
         assert obj.num_handles == 1
         assert obj.pts.is_cuda
@@ -119,9 +116,7 @@ class TestSimplicitsObjectFactory:
         vertices, faces = _cube_mesh(device, torch.float32)
         cfg = SimplicitsObjectCfg(num_samples=300, density=600.0)
 
-        obj = create_rigid_simplicits_object_from_mesh(
-            vertices, faces, cfg, device=device
-        )
+        obj = create_rigid_simplicits_object_from_mesh(vertices, faces, cfg, device=device)
 
         assert obj.num_handles == 1
         assert obj.pts.shape[0] == 300

@@ -410,7 +410,7 @@ class TerminationsCfg:
 
 @configclass
 class Dexsuite3dgReorientEnvCfg(ManagerBasedEnvCfg):
-    """Dexsuite 3dg reorientation task definition, also the base definition for derivative Lift task and evaluation task"""
+    """Dexsuite 3dg reorientation task; base for derivative Lift and evaluation tasks."""
 
     # Scene settings
     viewer: ViewerCfg = ViewerCfg(eye=(-2.25, 0.0, 0.75), lookat=(0.0, 0.0, 0.45), origin_type="env")
