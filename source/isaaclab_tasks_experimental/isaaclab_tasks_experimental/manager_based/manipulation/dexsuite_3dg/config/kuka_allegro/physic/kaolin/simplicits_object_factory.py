@@ -3,9 +3,6 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-# Copyright (c) 2022-2026, The Isaac Lab Project Developers.
-# SPDX-License-Identifier: BSD-3-Clause
-
 """Create a rigid Simplicits object from a mesh using Kaolin (surface sampling + create_rigid)."""
 
 from __future__ import annotations
@@ -18,6 +15,44 @@ import torch
 from .simplicits_cfg import SimplicitsObjectCfg
 
 logger = logging.getLogger("dexsuite_3dg.kaolin.factory")
+
+try:
+    from kaolin.ops.mesh import sample_points as _kaolin_sample_points
+    from kaolin.physics.simplicits import SimplicitsObject
+except ImportError:
+    _kaolin_sample_points = None  # type: ignore[assignment]
+    SimplicitsObject = None  # type: ignore[assignment]
+
+# Minimum radius [m] when computing from mesh to avoid numerical issues.
+_DEFAULT_COLLISION_RADIUS_MIN = 1e-4
+
+
+def compute_collision_particle_radius_from_mesh(
+    vertices: torch.Tensor,
+    num_samples: int,
+    factor: float = 0.5,
+) -> float:
+    """Compute a collision particle radius from mesh extent and sample count.
+
+    Uses extent / num_samples^(1/3) * factor so that radius scales with object
+    size and particle spacing. Used when collision_particle_radius is not set in config.
+
+    Args:
+        vertices: Mesh vertices [m], shape (V, 3).
+        num_samples: Number of particles (quadrature points).
+        factor: Scale factor; 0.5 gives radius ~ half the average spacing.
+
+    Returns:
+        Radius [m], at least _DEFAULT_COLLISION_RADIUS_MIN.
+    """
+    if vertices.dim() == 3:
+        vertices = vertices.squeeze(0)
+    extent = float((vertices.max(dim=0).values - vertices.min(dim=0).values).max().item())
+    if extent <= 0.0 or num_samples < 1:
+        return _DEFAULT_COLLISION_RADIUS_MIN
+    spacing = extent / (float(num_samples) ** (1.0 / 3.0))
+    radius = spacing * factor
+    return max(radius, _DEFAULT_COLLISION_RADIUS_MIN)
 
 
 def create_rigid_simplicits_object_from_mesh(
@@ -35,7 +70,7 @@ def create_rigid_simplicits_object_from_mesh(
     shape comes only from the mesh.
 
     Args:
-        vertices: Mesh vertices, shape (num_vertices, 3) or (1, num_vertices, 3).
+        vertices: Mesh vertices [m], shape (num_vertices, 3) or (1, num_vertices, 3).
         faces: Triangle indices, shape (num_faces, 3), long dtype.
         cfg: Simplicits object config (density, youngs_modulus, poisson_ratio, num_samples).
         device: Target device (e.g. 'cuda:0'). Inferred from vertices if None.
@@ -45,12 +80,10 @@ def create_rigid_simplicits_object_from_mesh(
     Returns:
         A rigid SimplicitsObject (Kaolin) with num_handles == 1.
     """
-    try:
-        from kaolin.physics.simplicits import SimplicitsObject
-    except ImportError as e:
+    if SimplicitsObject is None:
         raise ImportError(
             "Kaolin is required for Simplicits object creation. Install kaolin or set simplicits_enabled=False."
-        ) from e
+        )
 
     if device is None:
         device = vertices.device if isinstance(vertices, torch.Tensor) else "cuda:0"
@@ -70,15 +103,10 @@ def create_rigid_simplicits_object_from_mesh(
 
     num_samples = max(3, cfg.num_samples)
 
-    # Surface sampling via Kaolin
-    try:
-        import kaolin.ops.mesh as ko_mesh
-    except ImportError as e:
-        raise ImportError(
-            "Kaolin is required for mesh sampling. Install kaolin or set simplicits_enabled=False."
-        ) from e
+    if _kaolin_sample_points is None:
+        raise ImportError("Kaolin is required for mesh sampling. Install kaolin or set simplicits_enabled=False.")
 
-    points, _ = ko_mesh.sample_points(vertices, faces, num_samples)
+    points, _ = _kaolin_sample_points(vertices, faces, num_samples)
     pts = points.squeeze(0)
 
     # Approximate volume from axis-aligned bbox of sampled points
