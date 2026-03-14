@@ -12,15 +12,15 @@ So you must make the name `NewtonManager` in `isaaclab_newton.physics` refer to 
 
 1. **Subclass `NewtonManager`** in the experimental package (e.g. `Dexsuite3dgNewtonManager`) and override only the methods you need (e.g. `step`, `reset`, `_simulate`, or custom hooks).
 
-2. **Custom physics config**  
-   Define a config (e.g. `Dexsuite3dgNewtonCfg`) that extends `NewtonCfg` and sets  
-   `class_type = "{DIR}.dexsuite_3dg_newton_manager:Dexsuite3dgNewtonManager"`  
+2. **Custom physics config**
+   Define a config (e.g. `Dexsuite3dgNewtonCfg`) that extends `NewtonCfg` and sets
+   `class_type = "{DIR}.dexsuite_3dg_newton_manager:Dexsuite3dgNewtonManager"`
    so that `SimulationContext` uses your manager class.
 
-3. **Use your config for the newton preset**  
+3. **Use your config for the newton preset**
    In `KukaAllegroPhysicsCfg`, set `newton = Dexsuite3dgNewtonCfg(...)` (with the same solver/params as now) so that when `presets=newton` the sim uses your manager class.
 
-4. **Patch `NewtonManager` before the sim is created**  
+4. **Patch `NewtonManager` before the sim is created**
    Newton assets must see your class when they import `NewtonManager`. So **before** `SimulationContext(self.cfg.sim)` is created, patch the module:
 
    - In a **custom env class** that subclasses `ManagerBasedRLEnv` (e.g. `Dexsuite3dgManagerBasedRLEnv`):
@@ -31,22 +31,22 @@ So you must make the name `NewtonManager` in `isaaclab_newton.physics` refer to 
 
    - Register the gym env with `entry_point` pointing to this custom env class instead of `ManagerBasedRLEnv`, so your `__init__` (and thus the patch) always runs for the 3dg task.
 
-5. **Keep everything in the experimental package**  
+5. **Keep everything in the experimental package**
    - `Dexsuite3dgNewtonManager` and `Dexsuite3dgNewtonCfg` live under `config/kuka_allegro/physic/newton/`.
    - The custom env class and gym registration live in the dexsuite_3dg package. No changes to `isaaclab` or `isaaclab_newton`.
 
 ## File layout (skeleton)
 
-- `.../config/kuka_allegro/physic/newton/dexsuite_3dg_newton_manager.py`  
+- `.../config/kuka_allegro/physic/newton/dexsuite_3dg_newton_manager.py`
   - `Dexsuite3dgNewtonManager(NewtonManager)` with overrides (e.g. `step`, `reset`, or `_simulate`).
-- `.../config/kuka_allegro/physic/newton/dexsuite_3dg_newton_cfg.py`  
+- `.../config/kuka_allegro/physic/newton/dexsuite_3dg_newton_cfg.py`
   - `Dexsuite3dgNewtonCfg(NewtonCfg)` with `class_type = "{DIR}.dexsuite_3dg_newton_manager:Dexsuite3dgNewtonManager"`.
-- `.../config/kuka_allegro/dexsuite_kuka_allegro_env_cfg.py`  
+- `.../config/kuka_allegro/dexsuite_kuka_allegro_env_cfg.py`
   - In `KukaAllegroPhysicsCfg`, set `newton = Dexsuite3dgNewtonCfg()` (import from `.physic.newton`).
-- `.../dexsuite_3dg/dexsuite_3dg_env.py`  
+- `.../dexsuite_3dg/dexsuite_3dg_env.py`
   - `Dexsuite3dgManagerBasedRLEnv(ManagerBasedRLEnv)` that patches `isaaclab_newton.physics.NewtonManager` when `cfg.sim.physics.class_type` is `Dexsuite3dgNewtonManager`, then calls `super().__init__(...)`.
-- `.../config/kuka_allegro/__init__.py`  
-  - Register gym envs with  
+- `.../config/kuka_allegro/__init__.py`
+  - Register gym envs with
     `entry_point="...dexsuite_3dg_env:Dexsuite3dgManagerBasedRLEnv"` (and pass the same `env_cfg_entry_point` / agent configs as now).
 
 ## Summary

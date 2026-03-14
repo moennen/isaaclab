@@ -17,7 +17,6 @@ from isaaclab_assets.robots import KUKA_ALLEGRO_CFG
 
 from ... import dexsuite_env_cfg as dexsuite
 from ... import mdp
-from .physic.newton import Dexsuite3dgNewtonCfg
 from .camera_cfg import (
     BaseTiledCameraCfg,
     DuoCameraObservationsCfg,
@@ -25,6 +24,7 @@ from .camera_cfg import (
     StateObservationCfg,
     WristTiledCameraCfg,
 )
+from .physic.newton import Dexsuite3dgNewtonCfg
 
 FINGERTIP_LIST = ["index_link_3", "middle_link_3", "ring_link_3", "thumb_link_3"]
 THUMB_SENSOR = "thumb_link_3_object_s"

@@ -1,4 +1,6 @@
-# Copyright (c) 2022-2026, The Isaac Lab Project Developers.
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
 # SPDX-License-Identifier: BSD-3-Clause
 
 """Build a Newton rigid proto from USD for one env, excluding the Object prim (Step 2)."""
@@ -12,6 +14,19 @@ from newton import ModelBuilder
 from newton._src.usd.schemas import SchemaResolverNewton, SchemaResolverPhysx
 
 logger = logging.getLogger("dexsuite_3dg.newton.builder_utils")
+
+
+def get_builder_body_articulation_labels(builder: ModelBuilder) -> tuple[list[Any], list[Any]]:
+    """Return (body_labels, articulation_labels) from a Newton ModelBuilder.
+
+    Newton may expose body_label or body_key (and similarly for articulations);
+    this helper normalizes to lists for compatibility across versions.
+    """
+    body_labels = getattr(builder, "body_label", None) or getattr(builder, "body_key", [])
+    art_labels = getattr(builder, "articulation_label", None) or getattr(builder, "articulation_key", [])
+    body_list = list(body_labels) if body_labels is not None else []
+    art_list = list(art_labels) if art_labels is not None else []
+    return (body_list, art_list)
 
 
 def _register_solver_attributes(builder: ModelBuilder, solver_type: str) -> None:
@@ -101,15 +116,12 @@ def build_rigid_proto_excluding_object(
             schema_resolvers=schema_resolvers,
         )
         if verbose:
-            body_labels = getattr(builder, "body_label", None) or getattr(builder, "body_key", [])
-            art_labels = getattr(builder, "articulation_label", None) or getattr(
-                builder, "articulation_key", []
-            )
+            body_list, art_list = get_builder_body_articulation_labels(builder)
             logger.debug(
                 "builder_utils: after add_usd root_path=%s body_count=%s articulation_count=%s",
                 child_path,
-                len(body_labels) if body_labels is not None else 0,
-                len(art_labels) if art_labels is not None else 0,
+                len(body_list),
+                len(art_list),
             )
 
     return builder
