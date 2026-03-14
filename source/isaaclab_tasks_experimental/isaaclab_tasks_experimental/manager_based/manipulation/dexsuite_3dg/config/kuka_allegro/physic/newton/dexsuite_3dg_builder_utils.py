@@ -12,6 +12,7 @@ from typing import Any
 
 from newton import ModelBuilder
 from newton._src.usd.schemas import SchemaResolverNewton, SchemaResolverPhysx
+from newton.solvers import SolverMuJoCo
 
 logger = logging.getLogger("dexsuite_3dg.newton.builder_utils")
 
@@ -39,8 +40,6 @@ def _register_solver_attributes(builder: ModelBuilder, solver_type: str) -> None
     other solver types are no-op.
     """
     if solver_type == "mujoco_warp":
-        from newton.solvers import SolverMuJoCo
-
         SolverMuJoCo.register_custom_attributes(builder)
     # "xpbd", "featherstone", or any other solver_type: no builder registration in Newton API
 

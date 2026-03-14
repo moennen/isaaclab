@@ -3,9 +3,6 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-# Copyright (c) 2022-2026, The Isaac Lab Project Developers.
-# SPDX-License-Identifier: BSD-3-Clause
-
 """Simplicits object parameters (material, sampling) for mesh → rigid Simplicits."""
 
 from __future__ import annotations
@@ -32,3 +29,6 @@ class SimplicitsObjectCfg:
 
     num_samples: int = 2000
     """Number of points to sample from the mesh surface (Kaolin surface sampling)."""
+
+    collision_particle_radius: float | None = None
+    """Radius [m] for collision (scene-wide and per-particle). If None, computed from mesh extent and num_samples."""

@@ -7,6 +7,8 @@
 
 from __future__ import annotations
 
+from newton import ModelBuilder
+
 from pxr import Usd, UsdGeom
 
 from ....config.kuka_allegro.physic.newton import (
@@ -35,8 +37,6 @@ class TestBuildRigidProtoExcludingObject:
 
     def test_returns_model_builder(self):
         """Helper returns a Newton ModelBuilder."""
-        from newton import ModelBuilder
-
         stage = _minimal_stage_with_env_and_object()
         builder = build_rigid_proto_excluding_object(
             stage,

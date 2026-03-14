@@ -216,9 +216,9 @@ def farthest_point_sampling(
     otherwise falls back to an iterative version.
 
     Args:
-        points (torch.Tensor): Input points of shape (N, D).
-        n_samples (int): Number of samples to select.
-        memory_threashold (int): Max allowed bytes for distance matrix. Default 2 GiB.
+        points: Input points of shape (N, D).
+        n_samples: Number of samples to select.
+        memory_threashold: Max allowed bytes for distance matrix. Default 2 GiB.
 
     Returns:
         torch.Tensor: Indices of sampled points (n_samples,).

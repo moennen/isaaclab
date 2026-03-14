@@ -3,9 +3,6 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-# Copyright (c) 2022-2026, The Isaac Lab Project Developers.
-# SPDX-License-Identifier: BSD-3-Clause
-
 """Step 1 tests: mesh → rigid SimplicitsObject via Kaolin factory."""
 
 from __future__ import annotations
@@ -15,9 +12,11 @@ import pytest
 pytest.importorskip("kaolin")
 
 import torch
+from kaolin.physics.simplicits import SimplicitsObject
 
 from ....config.kuka_allegro.physic.kaolin import (
     SimplicitsObjectCfg,
+    compute_collision_particle_radius_from_mesh,
     create_rigid_simplicits_object_from_mesh,
 )
 
@@ -65,8 +64,6 @@ class TestSimplicitsObjectFactory:
 
     def test_returns_rigid_simplicits_object(self):
         """Factory returns a SimplicitsObject with num_handles == 1."""
-        from kaolin.physics.simplicits import SimplicitsObject
-
         device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
         vertices, faces = _cube_mesh(device, torch.float32)
         cfg = SimplicitsObjectCfg(num_samples=500)
@@ -109,6 +106,19 @@ class TestSimplicitsObjectFactory:
 
         assert obj.num_handles == 1
         assert obj.pts.is_cuda
+
+    def test_compute_collision_radius_from_mesh(self):
+        """Computed radius is positive and scales with extent and num_samples."""
+        v, _ = _cube_mesh(torch.device("cpu"), torch.float32)
+        r100 = compute_collision_particle_radius_from_mesh(v, 100)
+        r1000 = compute_collision_particle_radius_from_mesh(v, 1000)
+        assert r100 > 0 and r1000 > 0
+        # More samples -> smaller spacing -> smaller radius
+        assert r1000 < r100
+        # Scale mesh: extent 2 -> radius should be ~2x extent 1 (unit cube)
+        v2 = v * 2.0
+        r100_scaled = compute_collision_particle_radius_from_mesh(v2, 100)
+        assert r100_scaled > r100
 
     def test_config_drives_material_and_samples(self):
         """Changing cfg (density, num_samples) is reflected in the object."""
