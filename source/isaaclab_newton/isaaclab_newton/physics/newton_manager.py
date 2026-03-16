@@ -16,7 +16,7 @@ import warp as wp
 from newton import Axis, CollisionPipeline, Contacts, Control, Model, ModelBuilder, State, eval_fk
 from newton._src.usd.schemas import SchemaResolverNewton, SchemaResolverPhysx
 from newton.sensors import SensorContact as NewtonContactSensor
-from newton.solvers import SolverBase, SolverFeatherstone, SolverMuJoCo, SolverNotifyFlags, SolverXPBD
+from newton.solvers import SolverBase, SolverFeatherstone, SolverMuJoCo, SolverNotifyFlags, SolverVBD, SolverXPBD
 
 from isaaclab.physics import PhysicsEvent, PhysicsManager
 from isaaclab.sim.utils.stage import get_current_stage
@@ -78,6 +78,7 @@ class NewtonManager(PhysicsManager):
     _contacts: Contacts | None = None
     _needs_collision_pipeline: bool = False
     _collision_pipeline = None
+    _soft_contact_margin: float = 0.01
     _newton_contact_sensors: dict = {}  # Maps sensor_key to NewtonContactSensor
     _report_contacts: bool = False
 
@@ -249,6 +250,7 @@ class NewtonManager(PhysicsManager):
         cls._contacts = None
         cls._needs_collision_pipeline = False
         cls._collision_pipeline = None
+        cls._soft_contact_margin = 0.01
         cls._newton_contact_sensors = {}
         cls._report_contacts = False
         cls._graph = None
@@ -396,11 +398,18 @@ class NewtonManager(PhysicsManager):
         It ensures contacts are properly initialized with force attributes if sensors are registered.
         """
         if cls._needs_collision_pipeline:
-            # Newton collision pipeline: create pipeline and generate contacts
+            # Newton collision pipeline: create pipeline and contacts buffer
             if cls._collision_pipeline is None:
-                cls._collision_pipeline = CollisionPipeline(cls._model, broad_phase="explicit")
+                logger.info(f"VBD/XPBD: Creating CollisionPipeline (soft_contact_margin={cls._soft_contact_margin})")
+                cls._collision_pipeline = CollisionPipeline(
+                    cls._model,
+                    soft_contact_margin=cls._soft_contact_margin,
+                )
+                logger.info("VBD/XPBD: CollisionPipeline created")
             if cls._contacts is None:
+                logger.info("VBD/XPBD: Creating contacts buffer")
                 cls._contacts = cls._collision_pipeline.contacts()
+                logger.info("VBD/XPBD: contacts buffer created")
 
         elif cls._solver is not None and isinstance(cls._solver, SolverMuJoCo):
             # MuJoCo contacts mode: create properly sized Contacts object
@@ -455,6 +464,19 @@ class NewtonManager(PhysicsManager):
             elif cls._solver_type == "featherstone":
                 cls._use_single_state = False
                 cls._solver = SolverFeatherstone(cls._model, **cfg_dict)
+            elif cls._solver_type == "vbd":
+                cls._use_single_state = False
+                cls._needs_collision_pipeline = True
+                soft_contact_margin = cfg_dict.pop("soft_contact_margin", 0.01)
+                cls._soft_contact_margin = soft_contact_margin
+                solver_sig = inspect.signature(SolverVBD.__init__)
+                valid_solver_args = set(solver_sig.parameters.keys()) - {"self", "model"}
+                cfg_dict = {k: v for k, v in cfg_dict.items() if k in valid_solver_args}
+                logger.info(f"VBD: Creating SolverVBD with args: {cfg_dict}")
+                logger.info(f"VBD: model particle_count={getattr(cls._model, 'particle_count', 'N/A')}")
+                logger.info(f"VBD: model particle_color_groups has {len(getattr(cls._model, 'particle_color_groups', []))} groups")
+                cls._solver = SolverVBD(cls._model, **cfg_dict)
+                logger.info("VBD: SolverVBD created successfully")
             else:
                 raise ValueError(f"Invalid solver type: {cls._solver_type}")
 
@@ -495,31 +517,31 @@ class NewtonManager(PhysicsManager):
     def _simulate(cls) -> None:
         """Run one simulation step with substeps."""
 
-        # MJWarp can use its internal collision pipeline.
-        if cls._needs_collision_pipeline:
-            cls._collision_pipeline.collide(cls._state_0, cls._contacts)
-            contacts = cls._contacts
-        else:
-            contacts = None
-
-        def step_fn(state_0, state_1):
-            cls._solver.step(state_0, state_1, cls._control, contacts, cls._solver_dt)
+        # Rebuild BVH once per step for solvers that require it (e.g., VBD cloth).
+        if hasattr(cls._solver, "rebuild_bvh"):
+            cls._solver.rebuild_bvh(cls._state_0)
 
         if cls._use_single_state:
-            for i in range(cls._num_substeps):
-                step_fn(cls._state_0, cls._state_0)
+            for _ in range(cls._num_substeps):
+                if cls._needs_collision_pipeline:
+                    cls._collision_pipeline.collide(cls._state_0, cls._contacts)
+                cls._solver.step(cls._state_0, cls._state_0, cls._control, cls._contacts, cls._solver_dt)
                 cls._state_0.clear_forces()
         else:
             cfg = PhysicsManager._cfg
             need_copy_on_last_substep = (cfg is not None and cfg.use_cuda_graph) and cls._num_substeps % 2 == 1  # type: ignore[union-attr]
 
             for i in range(cls._num_substeps):
-                step_fn(cls._state_0, cls._state_1)
+                if cls._needs_collision_pipeline:
+                    cls._collision_pipeline.collide(cls._state_0, cls._contacts)
+                cls._solver.step(cls._state_0, cls._state_1, cls._control, cls._contacts, cls._solver_dt)
                 if need_copy_on_last_substep and i == cls._num_substeps - 1:
                     cls._state_0.assign(cls._state_1)
                 else:
                     cls._state_0, cls._state_1 = cls._state_1, cls._state_0
                 cls._state_0.clear_forces()
+
+        contacts = cls._contacts
 
         # Populate contacts for contact sensors
         if cls._report_contacts:

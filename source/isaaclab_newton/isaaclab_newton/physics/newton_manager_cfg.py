@@ -195,6 +195,52 @@ class FeatherstoneSolverCfg(NewtonSolverCfg):
 
 
 @configclass
+class VBDSolverCfg(NewtonSolverCfg):
+    """Configuration for the Vertex Block Descent (VBD) solver.
+
+    Supports particle simulation (cloth, soft bodies) and coupled rigid-body systems.
+    Requires ``ModelBuilder.color()`` to be called before ``finalize()`` to build
+    the parallel vertex colouring needed by the solver.
+    """
+
+    solver_type: str = "vbd"
+
+    iterations: int = 10
+    """Number of VBD iterations per substep."""
+
+    particle_enable_self_contact: bool = False
+    """Whether to enable cloth self-contact."""
+
+    particle_self_contact_radius: float = 0.005
+    """Particle radius used for self-contact detection [m]."""
+
+    particle_self_contact_margin: float = 0.005
+    """Self-contact detection margin [m]. Should be >= particle_self_contact_radius."""
+
+    particle_collision_detection_interval: int = -1
+    """Controls how frequently particle self-contact detection is applied.
+
+    If set to a value < 0, collision detection is only performed once before the
+    initialization step. If set to 0, collision detection is applied twice: once
+    before and once immediately after initialization. If set to a value ``k`` >= 1,
+    collision detection is applied before every ``k`` VBD iterations.
+    """
+
+    particle_vertex_contact_buffer_size: int = 32
+    """Preallocation size for each vertex's vertex-triangle collision buffer."""
+
+    particle_edge_contact_buffer_size: int = 64
+    """Preallocation size for each edge's edge-edge collision buffer."""
+
+    soft_contact_margin: float = 0.01
+    """Soft-contact detection margin passed to the CollisionPipeline [m].
+
+    This is not a ``SolverVBD`` parameter; it is used to configure the Newton
+    ``CollisionPipeline`` that generates body–particle contacts.
+    """
+
+
+@configclass
 class NewtonCfg(PhysicsCfg):
     """Configuration for Newton physics manager.
 
