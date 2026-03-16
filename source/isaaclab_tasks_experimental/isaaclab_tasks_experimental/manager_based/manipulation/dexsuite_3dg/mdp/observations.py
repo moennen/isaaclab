@@ -189,7 +189,13 @@ def fingers_contact_force_b(
     contact_sensor_names: list[str],
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
 ) -> torch.Tensor:
-    """base-frame contact forces from listed sensors, concatenated per env.
+    """Base-frame contact forces from listed sensors, concatenated per env.
+
+    Uses :attr:`ContactSensorData.force_matrix_w` when available (rigid object filter).
+    When that is None (e.g. object is Simplicits and not a rigid body), uses
+    :attr:`ContactSensorData.net_forces_w` so the policy still receives valid
+    observations with the same shape: total contact force per finger in world frame,
+    then transformed to robot base frame.
 
     Args:
         env: The environment.
@@ -197,11 +203,17 @@ def fingers_contact_force_b(
 
     Returns:
         Tensor of shape ``(num_envs, 3 * num_sensors)`` with forces stacked horizontally as
-        ``[fx, fy, fz]`` per sensor.
+        ``[fx, fy, fz]`` per sensor, in robot base frame.
     """
-    force_w = [
-        wp.to_torch(env.scene.sensors[name].data.force_matrix_w).view(env.num_envs, 3) for name in contact_sensor_names
-    ]
+    force_w = []
+    for name in contact_sensor_names:
+        data = env.scene.sensors[name].data
+        if data.force_matrix_w is not None:
+            f = wp.to_torch(data.force_matrix_w).view(env.num_envs, -1)[:, :3]
+        else:
+            # force_matrix_w is None when filter matches no rigid body (e.g. Object is Simplicits)
+            f = wp.to_torch(data.net_forces_w).view(env.num_envs, -1, 3)[:, 0, :]
+        force_w.append(f)
     force_w = torch.stack(force_w, dim=1)
     robot: Articulation = env.scene[asset_cfg.name]
     root_link_quat_w = wp.to_torch(robot.data.root_link_quat_w)

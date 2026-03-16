@@ -65,8 +65,16 @@ def object_ee_distance(
 
 
 def _contact_force_mag(sensor: ContactSensor, num_envs: int) -> torch.Tensor:
-    """Extract per-environment contact force magnitude from a sensor's force_matrix_w."""
-    force = wp.to_torch(sensor.data.force_matrix_w).view(num_envs, 3)
+    """Per-environment contact force magnitude from a sensor.
+
+    Uses force_matrix_w when available (filtered rigid object); otherwise net_forces_w
+    (e.g. when object is Simplicits and not a rigid body), so rewards stay valid.
+    """
+    data = sensor.data
+    if data.force_matrix_w is not None:
+        force = wp.to_torch(data.force_matrix_w).view(num_envs, -1)[:, :3]
+    else:
+        force = wp.to_torch(data.net_forces_w).view(num_envs, -1, 3)[:, 0, :]
     return torch.linalg.norm(force, dim=-1)
 
 

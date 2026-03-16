@@ -158,7 +158,6 @@ class ObjectUniformPoseCommand(CommandTerm):
 
                 self.goal_visualizer = VisualizationMarkers(self.cfg.goal_pose_visualizer_cfg)
                 self.curr_visualizer = VisualizationMarkers(self.cfg.curr_pose_visualizer_cfg)
-            # set their visibility to true
             self.goal_visualizer.set_visibility(True)
             self.curr_visualizer.set_visibility(True)
         else:

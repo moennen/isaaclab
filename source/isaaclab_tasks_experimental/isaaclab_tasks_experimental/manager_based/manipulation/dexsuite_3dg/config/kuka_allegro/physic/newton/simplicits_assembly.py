@@ -161,16 +161,17 @@ def build_multi_env_simplicits_model(
     up_axis: str = "Z",
     solver_type: str | None = None,
     num_qp: int | None = None,
-    collision_particle_radius: float = 0.05,
+    collision_particle_radius: float | None = None,
     detection_ratio: float = 1.5,
     gravity: float = 9.81,
     verbose: bool = False,
 ) -> tuple[Any, list[tuple[int, int]]]:
-    """Build a multi-env SimplicitsModel with one world per env; return model and per-env particle ranges.
+    """Build a multi-env SimplicitsModel with one world per env; return model and particle ranges.
 
     For each env: begin_world() → add rigid proto with env xform → add one Simplicits object
     → end_world(). Then add_simplicits_collisions(), add_ground_plane(), finalize().
     Particles are registered per world so collision is isolated per env.
+    Use the Newton visualizer's show_particles option to display Simplicits particles.
 
     Args:
         stage: USD stage.
@@ -184,14 +185,14 @@ def build_multi_env_simplicits_model(
         up_axis: Newton up axis (e.g. Z).
         solver_type: Solver type for rigid proto (e.g. mujoco_warp); None to skip solver-specific registration.
         num_qp: Quadrature points per object; defaults to simplicits_cfg.num_samples.
-        collision_particle_radius: If None, uses cfg or computed from first env mesh and num_samples.
+        collision_particle_radius: Radius [m]; if None, uses cfg or computed from first env mesh and num_samples.
         detection_ratio: Passed to add_simplicits_collisions.
         gravity: Gravity magnitude [m/s²] (positive).
         verbose: If True, log assembly steps.
 
     Returns:
-        (model, per_env_particle_ranges) where per_env_particle_ranges[i] = (start, end) into
-        state.particle_q for env i (within the Simplicits slice).
+        (model, per_env_particle_ranges). per_env_particle_ranges[i] = (start, end)
+        into state.particle_q for env i.
     """
     if SimplicitsModelBuilder is None:
         raise ImportError(
