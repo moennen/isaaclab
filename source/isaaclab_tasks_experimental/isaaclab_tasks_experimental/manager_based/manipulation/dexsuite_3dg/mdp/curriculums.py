@@ -23,7 +23,10 @@ def initial_final_interpolate_fn(env: ManagerBasedRLEnv, env_id, data, initial_v
     Works on arbitrarily nested structures of lists/tuples; scalars (int/float)
     are interpolated at the leaves.
     """
-    difficulty_term: DifficultyScheduler = getattr(env.curriculum_manager.cfg, difficulty_term_str).func
+    term_cfg = getattr(env.curriculum_manager.cfg, difficulty_term_str, None)
+    if term_cfg is None:
+        raise KeyError(f"Unknown difficulty_term_str: {difficulty_term_str!r}")
+    difficulty_term: DifficultyScheduler = term_cfg.func
     frac = difficulty_term.difficulty_frac
     if frac < 0.1:
         return mdp.modify_env_param.NO_CHANGE

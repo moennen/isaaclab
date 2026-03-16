@@ -11,6 +11,8 @@ from isaaclab_newton.physics import MJWarpSolverCfg, NewtonCfg
 
 from isaaclab.utils import configclass
 
+from ..kaolin import SimplicitsObjectCfg
+
 
 @configclass
 class Dexsuite3dgNewtonCfg(NewtonCfg):
@@ -18,6 +20,12 @@ class Dexsuite3dgNewtonCfg(NewtonCfg):
 
     class_type: type | str = "{DIR}.dexsuite_3dg_newton_manager:Dexsuite3dgNewtonManager"
     """Use the extended manager so 3dg-specific overrides run in Newton mode."""
+
+    simplicits_enabled: bool = False
+    """When True, spawn object is simulated as rigid Simplicits (Step 5); requires simplicits_cfg."""
+
+    simplicits_cfg: SimplicitsObjectCfg | None = None
+    """Simplicits material/sampling/collision config. Used only when simplicits_enabled is True."""
 
     solver_cfg: MJWarpSolverCfg = MJWarpSolverCfg(
         solver="newton",

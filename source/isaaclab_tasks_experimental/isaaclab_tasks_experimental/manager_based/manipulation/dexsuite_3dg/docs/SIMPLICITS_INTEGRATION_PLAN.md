@@ -28,18 +28,23 @@ Constraints for us:
 
 ## 2. Validation command (canonical)
 
+**Environment:** All tests and scripts for this task must be executed in the micromamba environment **`env_isaaclab-newton2`**, e.g.:
+
+- Tests: ``micromamba run -n env_isaaclab-newton2 ./isaaclab.sh -p -m pytest .../dexsuite_3dg/test/ ...``
+- Scripts (e.g. play): ``micromamba run -n env_isaaclab-newton2 ./isaaclab.sh -p scripts/...``
+
 Use the following to validate the implementation against the current rigid-object behavior. Run from the IsaacLab repo root; with simplicits **disabled** this should match current behavior; with simplicits **enabled** the same command should run without error and the policy should still receive compatible observations/actions.
 
 ```bash
-CUDA_VISIBLE_DEVICES=1 python scripts/reinforcement_learning/rsl_rl/play.py \
+micromamba run -n env_isaaclab-newton2 ./isaaclab.sh -p scripts/reinforcement_learning/rsl_rl/play.py \
   --task Isaac-Dexsuite-3dg-Kuka-Allegro-Lift-Play-v0 \
   --num_envs 1 \
   --visualizer newton \
   presets=cube
 ```
 
-- Use the project’s usual Python environment (e.g. `./isaaclab.sh -p` or `micromamba run -n env_isaaclab-newton2` when applicable).
-- If the project uses `./isaaclab.sh -p` for running Python, use: `./isaaclab.sh -p scripts/reinforcement_learning/rsl_rl/play.py ...` (same args).
+- Run all tests and scripts in micromamba env ``env_isaaclab-newton2`` (see Environment above). When already inside the activated env, you can use ``./isaaclab.sh -p ...``. Legacy note: Use the project’s usual Python environment (e.g. `./isaaclab.sh -p` or `micromamba run -n env_isaaclab-newton2` when applicable).
+- When already inside the activated env, use ``./isaaclab.sh -p scripts/...`` (optionally with ``CUDA_VISIBLE_DEVICES=1``).
 
 ### 2.1 play.py always working (intermediate integration)
 
@@ -59,6 +64,30 @@ CUDA_VISIBLE_DEVICES=1 python scripts/reinforcement_learning/rsl_rl/play.py \
 
 **Implementation:** From Step 2 onward, when the user enables Simplicits (or uses a config that requires Simplicits) before the corresponding feature is implemented, the task or manager should **detect** it and **raise a clear error** (e.g. `RuntimeError` or task-level check with a message pointing to the config or the step to complete). Never leave the user with an opaque crash. After Step 5, the default or a documented "minimal Simplicits" preset (e.g. num_envs=1, newton visualizer) should work so that play.py is always runnable in some configuration.
 
+### 2.2 How to enable Simplicits
+
+A **physics preset** ``simplicits`` is defined in :class:`KukaAllegroPhysicsCfg`. It uses
+:class:`Dexsuite3dgNewtonCfg` with ``simplicits_enabled=True`` and a default
+:class:`SimplicitsObjectCfg` (e.g. ``num_samples=50``). A matching **scene preset**
+``simplicits`` in :class:`KukaAllegroSceneCfg` uses :class:`SimplicitsObjectAdapterCfg`
+for the object so that pose comes from particle CoM (no Newton rigid body for Object).
+
+**Play (or train) with Simplicits:**
+
+- **Overrides:** Set both the physics and scene to the ``simplicits`` preset:
+
+  .. code-block:: bash
+
+     ./isaaclab.sh -p scripts/reinforcement_learning/rsl_rl/play.py \
+       --task Isaac-Dexsuite-3dg-Kuka-Allegro-Lift-Play-v0 \
+       --num_envs 1 --visualizer newton \
+       presets=cube env.sim.physics=simplicits env.scene=simplicits
+
+- **Requirements:** Kaolin with Newton support must be installed. With both presets,
+  the spawn object is simulated as rigid Simplicits (particles) and
+  :class:`SimplicitsObjectAdapter` exposes its pose via ``scene["object"]``; the rest
+  of the scene (robot, table, ground) is unchanged.
+
 ---
 
 ## 3. High-level approach (no changes outside task folder)
@@ -74,11 +103,21 @@ Newton *does* know about the Simplicits object: after `SimplicitsModelBuilder.fi
 
 **Neither the visualizer nor the sensors read USD each frame** — they use data from the **physics manager (Newton state / contacts)**. The actual behaviour is:
 
-- **Newton OpenGL visualizer:** Does **not** read USD. Each frame it gets **state** from the scene data provider (`get_newton_state()` → `NewtonManager.get_state_0()`). The Newton viewer calls `viewer.log_state(state)` and draws from **state**: bodies from `body_q` and **particles** from `state.particle_q` (when "Show Particles" is enabled; see `newton/_src/viewer/viewer.py` `_log_particles()`). So the Simplicits object is **already visible** as soon as its particles are in `state.particle_q` — **no USD or Fabric sync needed** for this path.
+- **Newton OpenGL visualizer:** The Simplicits object is made visible via a **visual proxy body** (see "Visualization for Simplicits" below). No changes to ``isaaclab_visualizers`` are required; the viewer draws from **state** as usual (bodies from `body_q`). The proxy is a kinematic body whose pose is updated each step from the Simplicits object CoM/orientation.
 
 - **Kit / RTX:** When the renderer requires USD (e.g. `kit`, `isaac_rtx`, `ovrtx`), the scene data provider's `update()` runs `NewtonManager.sync_transforms_to_usd()`, which **writes** `state_0.body_q` to Fabric for each prim with a body. The Object has **no** body in the Simplicits path, so for Kit/RTX we must **additionally write** the Object prim world transform to Fabric (from the same Simplicits pose as MDP), only when `_needs_usd_sync` is True. Sensors get data from the physics pipeline (state/contacts), not from USD.
 
-(1) Newton visualizer uses **state** only; Simplicits object shows as particles in `state.particle_q` (enable "Show Particles"). (2) Kit/RTX: we **write** body_q to Fabric; we must also **write** the Object prim transform to Fabric when Kit/RTX is active. (3) Sensors use state/contacts from the manager, not USD. Contact sensor may need extending so soft–rigid (finger–Simplicits) contacts are visible to the task.
+(1) Newton visualizer: Simplicits object is shown by a **proxy body** in ``body_q``, driven each step from particle CoM; no "Show Particles" or visualizer code changes. (2) Kit/RTX: we **write** body_q to Fabric; we must **write** the Object prim transform to Fabric when Kit/RTX is active. (3) Sensors use state/contacts from the manager, not USD.
+
+**Visualization for Simplicits (Newton viewer)**
+
+To show the Simplicits object in the Newton OpenGL visualizer **without** modifying ``isaaclab_visualizers`` or relying on a "Show Particles" option, the task uses a **visual proxy body**:
+
+1. **Build time** (in :file:`simplicits_assembly.py`, :meth:`_MultiWorldSimplicitsModelBuilder.build_worlds_with_particles`): For each environment, after adding the rigid proto and Simplicits particles, a **kinematic body** (mass=0, ``is_kinematic=True``, label ``"simplicits_object_proxy"``) is added to the Newton model. It is given a **box shape** (e.g. 0.05 m side for a cube; ``as_site=True`` so it is visual-only and does not participate in collision). The body index for this proxy is stored per env and returned from the builder.
+
+2. **Simulation** (in :file:`dexsuite_3dg_newton_manager.py`): After each two-phase step (rigid + Simplicits), :func:`_update_simplicits_proxy_bodies` is called. It gets the current Simplicits object pose (CoM position and Kabsch orientation) via :meth:`get_simplicits_object_pose`, then writes that pose into ``state.body_q`` at the proxy body indices using a small Warp kernel. The Newton viewer then draws the proxy like any other body in ``body_q``.
+
+3. **Result:** The object appears in the Newton viewer as a box that follows the Simplicits object's center of mass and orientation. No changes to the Newton visualizer or ``isaaclab_visualizers`` are required. The underlying particles remain in ``state.particle_q``; if the Newton viewer supports a "Show Particles" option elsewhere, that would show the actual particle cloud in addition to (or instead of) the proxy box.
 
 **What “physics pipeline” means and how we support it (contact sensors)**
 
@@ -90,7 +129,7 @@ Newton *does* know about the Simplicits object: after `SimplicitsModelBuilder.fi
 
 Renders do **not** read USD each frame for poses. They get pose data from the **physics pipeline** in one of two ways:
 
-- **Newton Warp renderer** (e.g. when using the Newton visualizer with tiled cameras): Each frame, `NewtonWarpRenderer.render()` calls `newton_sensor.update(get_scene_data_provider().get_newton_state(), ...)`. So the renderer receives **Newton state** directly (`NewtonManager.get_state_0()`). It draws from that state: **body poses** from `state.body_q` and **particles** from `state.particle_q` (the Newton Warp backend uses the Newton model + state; no USD, no Fabric). For Simplicits, the object is already in `state.particle_q`, so **no extra sync** is needed for this path — the camera sees the correct scene.
+- **Newton Warp renderer** (e.g. when using the Newton visualizer with tiled cameras): Each frame, `NewtonWarpRenderer.render()` calls `newton_sensor.update(get_scene_data_provider().get_newton_state(), ...)`. So the renderer receives **Newton state** directly (`NewtonManager.get_state_0()`). It draws from that state: **body poses** from `state.body_q` and optionally **particles** from `state.particle_q`. For Simplicits, the object is visible via the **proxy body** in `body_q` (see "Visualization for Simplicits" in Section 3), so **no extra sync** is needed — the camera sees the correct scene.
 
 - **Kit / RTX** (e.g. `kit`, `isaac_rtx`, `ovrtx`): The scene data provider’s `update()` is called at render cadence. When `_needs_usd_sync` is True it calls `NewtonManager.sync_transforms_to_usd()`, which **writes** `state_0.body_q` into Fabric (`omni:fabric:worldMatrix` for each prim that has a body index). The Kit/RTX renderer **reads those world matrices from Fabric** to know where to draw each prim; geometry (meshes) still comes from the USD stage, but **transforms are driven by physics state** every frame. In the Simplicits path the Object has **no** body, so it has no row in that write; we must **additionally** write the Object prim’s world transform to Fabric (from the same Simplicits-derived pose used for MDP), only when Kit/RTX is active (Step 6).
 
@@ -497,7 +536,7 @@ Each step below includes: **Feature**, **Tests (task `test/` folder)**, **How to
 **Debugging capabilities:**
 - **Logging:** Logger `dexsuite_3dg.newton.manager`. DEBUG: “simplicits mode enabled”, builder build time, model type after finalize, existing rigid solver type (e.g. MuJoCo — from config, for validation) and SimplicitsSolver presence. INFO: on first step, log that two-phase step ran. WARNING: if model is not SimplicitsModel but flag is on.
 - **Verbosity:** Config or env (e.g. `DEXSUITE_3DG_SIMPLICITS_VERBOSE=1`) to log every N steps (e.g. step count, particle_count, rigid body count) to avoid log spam.
-- **Visualization:** Newton visualizer with `presets=cube` and `--num_envs 1`: visually confirm all scene elements (e.g. robot, table) and object (particles or proxy) are present and object falls/rests on table. If available, enable “show particles” in the viewer to see Simplicits particles.
+- **Visualization:** Newton visualizer with `presets=cube` and `--num_envs 1`: the Simplicits object is shown as a **proxy box** (see "Visualization for Simplicits" in Section 3); confirm all scene elements (robot, table, object proxy) are present and the object falls/rests on the table.
 - **Profiling:** Enable optional profiling (Section 6); inspect timings for finalize vs step phases.
 
 **Acceptance:** With flag on, task uses Simplicits and two-phase stepping; with flag off, unchanged. Validation command runs in both modes.
@@ -508,7 +547,7 @@ Each step below includes: **Feature**, **Tests (task `test/` folder)**, **How to
 
 - **Scope:** Task folder only: manager or a small “simplicits object data” helper; **no changes** to MDP (rewards, observations, terminations, commands). Adapter must expose the **same** interface as current rigid object data (`root_pos_w`, `root_quat_w`, etc.) so pretrained policies work.
 - **Goal:** When simplicits mode is on, the object’s pose in the scene is driven by Simplicits state: e.g. center of mass of the Simplicits particles for that env. For rigid Simplicits (1 handle), orientation can be taken from the handle transform (or identity in world if not rotated); alternatively derived from particle covariance if needed. The existing `env.scene["object"]` must still be usable and return compatible data.
-- **Visualizer:** Newton OpenGL visualizer uses **state** only (no USD); the object is visible as particles in `state.particle_q` when "Show Particles" is on. For **Kit/RTX** only (when `_needs_usd_sync` is True), the same pose (e.g. CoM) must **write the Object prim’s world transform in USD** after each step, so the visualizer and cameras see the object (so the Kit viewport or RTX cameras see the object).
+- **Visualizer:** Newton OpenGL visualizer uses **state** only (no USD); the Simplicits object is visible via a **proxy body** in `body_q` (see "Visualization for Simplicits" in Section 3). For **Kit/RTX** only (when `_needs_usd_sync` is True), the same pose (e.g. CoM) must **write the Object prim’s world transform in USD** after each step, so the visualizer and cameras see the object (so the Kit viewport or RTX cameras see the object).
 
 **Feature:** MDP and pretrained policies see the same observation/action/reward interface; only the data source (Simplicits state) changes internally.
 
@@ -523,9 +562,14 @@ Each step below includes: **Feature**, **Tests (task `test/` folder)**, **How to
 **Debugging capabilities:**
 - **Logging:** Logger for object adapter (e.g. `dexsuite_3dg.simplicits.object_adapter`). DEBUG: CoM computed from particle slice, exposed `root_pos_w`/`root_quat_w` once per N steps. WARNING: if particle slice is empty or indices out of range.
 - **Verbosity:** When verbose, log object pose every N steps and compare to previous rigid-object run (same env, same policy) to spot drift or wrong coordinate frame.
-- **Visualization:** In Newton visualizer, ensure the “object” pose used for rewards/commands (e.g. target or success marker) aligns with the visible Simplicits particle cloud. Optional: draw a small marker at the CoM used for MDP to confirm it matches the object.
+- **Visualization:** In Newton visualizer, ensure the “object” pose used for rewards/commands (e.g. target or success marker) aligns with the **proxy box** driven by Simplicits CoM/orientation.
 
 **Acceptance:** MDP (rewards, terminations, observations, commands) works with Simplicits object; pose is consistent; **no MDP code changes**; pretrained policy runs with simplicits on.
+
+**Policy and observation alignment (avoiding "policy craziness"):**
+- **Object pose:** The adapter exposes ``root_pos_w`` and ``root_quat_w`` from Simplicits particle CoM and Kabsch rotation; same convention (xyzw) as rigid object and Isaac Lab math.
+- **Object velocity:** The adapter fills ``root_com_vel_w`` from the Simplicits particle CoM velocity (``get_simplicits_object_velocity()`` using ``state.particle_qd``) so any observation or reward that reads object velocity sees plausible values instead of zero.
+- **Contact force:** When the object is Simplicits, the contact sensor's ``force_matrix_w`` (filtered by rigid body) is ``None``. The task uses ``net_forces_w`` as fallback so the policy still gets a valid tensor with the same shape. **Semantic difference:** with rigid object the observation is object-only contact force; with Simplicits it is **total** contact force per finger (including table, etc.). Policies trained on rigid may see a distribution shift; fine-tuning or training with Simplicits from the start can improve behavior.
 
 ---
 
@@ -598,7 +642,7 @@ Each step below includes: **Feature**, **Tests (task `test/` folder)**, **How to
 - **Robot simulation (solver-agnostic):** The rigid/articulation phase must use the **same** solver and step logic as the base NewtonManager (e.g. MuJoCo for this task, via `MJWarpSolverCfg`). Do not introduce Featherstone or any other specific solver for the robot; the implementation must work with whatever solver is configured.
 - **MDP:** No code changes; pretrained policies must work with simplicits on via the same interface.
 - **State layout:** SimplicitsModel uses `sim_z` / `sim_z_dot` and a slice of `particle_q` / `particle_qd`; manager and solver keep this consistent with Newton state.
-- **Visualizer and sensors:** Newton visualizer uses **state** (body_q, particle_q) directly; for **Kit/RTX** we must **write** the Object prim transform to Fabric (Step 6) when `_needs_usd_sync` is True. **Contact sensors:** soft–rigid contacts (e.g. finger–object) exist in the physics; how they are exposed to the existing Newton contact sensor (body/shape-based) must be validated and possibly adapted so the task still sees “object” contacts (see Section 3, subsections on physics pipeline and contact/visual sensors).
+- **Visualizer and sensors:** Newton visualizer uses **state** (body_q) directly; the Simplicits object is drawn via a **proxy body** in body_q (see "Visualization for Simplicits" in Section 3); for **Kit/RTX** we must **write** the Object prim transform to Fabric (Step 6) when `_needs_usd_sync` is True. **Contact sensors:** soft–rigid contacts (e.g. finger–object) exist in the physics; how they are exposed to the existing Newton contact sensor (body/shape-based) must be validated and possibly adapted so the task still sees “object” contacts (see Section 3, subsections on physics pipeline and contact/visual sensors).
 
 **Multi-environment support (no cross-env interaction)**
 
@@ -638,7 +682,7 @@ For each step: **feature** (how it changes what happens when running the play te
 
 5. **Step 5 — Manager builder injection and solver wiring**
    - **Feature:** With simplicits **on**: at startup, the manager builds a SimplicitsModelBuilder (rigid proto + Simplicits object per env from spawned mesh) and replaces the default builder, then runs two-phase steps (existing rigid solver + SimplicitsSolver). Play test **changes** only when the simplicits flag is on: model becomes SimplicitsModel, object is simulated as particles; with flag off, play runs exactly as today.
-   - **Validation:** Play with flag **off**: same behavior as current (rigid object). Play with flag **on** and `--num_envs 1`: no crash; simulation steps; rigid scene (e.g. robot, table) moves; object visible (particles or proxy). Run for 100–200 steps to confirm stability.
+   - **Validation:** Play with flag **off**: same behavior as current (rigid object). Play with flag **on** and `--num_envs 1`: no crash; simulation steps; rigid scene (e.g. robot, table) moves; object visible (proxy box in Newton viewer). Run for 100–200 steps to confirm stability.
 
 6. **Step 6 — Object pose for MDP (no MDP code changes)**
    - **Feature:** When simplicits is on, object pose seen by the policy (rewards, observations, commands) comes from Simplicits state (e.g. particle CoM) via the same `env.scene["object"]` interface. Play test with simplicits on now has **correct** object pose for the policy so rewards/observations/terminations and pretrained policies work.

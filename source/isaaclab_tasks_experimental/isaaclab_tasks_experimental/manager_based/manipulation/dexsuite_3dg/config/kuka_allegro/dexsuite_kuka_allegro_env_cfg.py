@@ -24,7 +24,12 @@ from .camera_cfg import (
     StateObservationCfg,
     WristTiledCameraCfg,
 )
+from .physic.kaolin import SimplicitsObjectCfg
 from .physic.newton import Dexsuite3dgNewtonCfg
+from .physic.newton.simplicits_object_adapter import (
+    SimplicitsObjectAdapter,
+    SimplicitsObjectAdapterCfg,
+)
 
 FINGERTIP_LIST = ["index_link_3", "middle_link_3", "ring_link_3", "thumb_link_3"]
 THUMB_SENSOR = "thumb_link_3_object_s"
@@ -37,6 +42,11 @@ class KukaAllegroPhysicsCfg(PresetCfg):
 
     default = Dexsuite3dgNewtonCfg()
     newton = default
+    simplicits = Dexsuite3dgNewtonCfg(
+        simplicits_enabled=True,
+        simplicits_cfg=SimplicitsObjectCfg(num_samples=50),
+    )
+    """Newton with Simplicits spawn object (rigid particles). Use env.sim.physics=simplicits to enable."""
     physx = PhysxCfg(
         bounce_threshold_velocity=0.01,
         gpu_max_rigid_patch_count=4 * 5 * 2**15,
@@ -73,6 +83,15 @@ class KukaAllegroSceneCfg(PresetCfg):
     default = KukaAllegroSceneCfg(num_envs=4096, env_spacing=3, replicate_physics=True)
     single_camera = default.replace(base_camera=BaseTiledCameraCfg())
     duo_camera = default.replace(base_camera=BaseTiledCameraCfg(), wrist_camera=WristTiledCameraCfg())
+    # Use SimplicitsObjectAdapter for object when running with env.sim.physics=simplicits.
+    simplicits = default.replace(
+        object=SimplicitsObjectAdapterCfg(
+            prim_path=default.object.prim_path,
+            spawn=default.object.spawn,
+            init_state=default.object.init_state,
+            class_type=SimplicitsObjectAdapter,
+        )
+    )
 
 
 @configclass
