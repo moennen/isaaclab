@@ -15,15 +15,27 @@ from isaaclab_tasks.utils import PresetCfg
 
 @configclass
 class DropClothPhysicsCfg(PresetCfg):
+    particle_self_contact_radius = 0.002
+    particle_self_contact_margin = 0.002
+    soft_contact_ke = 1e4
+
     default: NewtonCfg = NewtonCfg(
         solver_cfg=VBDSolverCfg(
             iterations=5,
-            particle_enable_self_contact=False,
-            soft_contact_margin=0.01,
+            integrate_with_external_rigid_solver=True,
+            particle_self_contact_radius=particle_self_contact_radius,
+            particle_self_contact_margin=particle_self_contact_margin,
+            particle_topological_contact_filter_threshold=1,
+            particle_rest_shape_contact_exclusion_radius=0.5,
+            particle_enable_self_contact=True,
+            particle_vertex_contact_buffer_size=16,
+            particle_edge_contact_buffer_size=20,
             particle_collision_detection_interval=-1,
+            rigid_contact_k_start=soft_contact_ke,
         ),
         num_substeps=10,
-        use_cuda_graph=False,  # Disable for debugging; re-enable once working
+        # use_cuda_graph=False,  # Disable for debugging; re-enable once working
+        use_cuda_graph=True,
     )
     newton: NewtonCfg = default
 
@@ -45,4 +57,4 @@ class DropClothEnvCfg(DirectRLEnvCfg):
     scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=1, env_spacing=4.0, replicate_physics=False)
 
     # cloth drop height above the ground [m]
-    cloth_drop_height: float = 1.5
+    cloth_drop_height: float = 0.5

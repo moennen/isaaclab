@@ -15,7 +15,7 @@ import torch
 import warp as wp
 from pxr import Usd, UsdGeom
 
-import newton as nwt
+import newton
 from isaaclab.envs import DirectRLEnv
 from isaaclab.physics import PhysicsEvent
 from isaaclab.sim.spawners.from_files import GroundPlaneCfg, spawn_ground_plane
@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 
 # ─── cloth mesh asset ────────────────────────────────────────────────────────
 _SHIRT_USD = os.path.join(
-    os.path.dirname(nwt.__file__),
+    os.path.dirname(newton.__file__),
     "examples",
     "assets",
     "unisex_shirt.usd",
@@ -90,15 +90,19 @@ class DropClothEnv(DirectRLEnv):
         usd_prim = usd_stage.GetPrimAtPath("/root/shirt")
         mesh = UsdGeom.Mesh(usd_prim)
 
-        pts_cm = np.array(mesh.GetPointsAttr().Get(), dtype=np.float32)
-        indices = list(mesh.GetFaceVertexIndicesAttr().Get())
+        # pts_cm = np.array(mesh.GetPointsAttr().Get(), dtype=np.float32)
+        # indices = list(mesh.GetFaceVertexIndicesAttr().Get())
+        # # Convert vertices from cm (USD) to meters
+        # vertices = [wp.vec3(float(p[0] * _CLOTH_SCALE), float(p[1] * _CLOTH_SCALE), float(p[2] * _CLOTH_SCALE)) for p in pts_cm]
 
-        # Convert vertices from cm (USD) to meters
-        vertices = [wp.vec3(float(p[0] * _CLOTH_SCALE), float(p[1] * _CLOTH_SCALE), float(p[2] * _CLOTH_SCALE)) for p in pts_cm]
+        shirt_mesh = newton.usd.get_mesh(usd_prim)
+        mesh_points = shirt_mesh.vertices
+        mesh_indices = shirt_mesh.indices
+        vertices = [wp.vec3(v * _CLOTH_SCALE) for v in mesh_points]
 
         # Rotate -90° around x so the shirt's y-up axis maps to z-up (gravity is -z).
         # After this rotation the shirt occupies z ≈ [0.88, 1.52] m above the ground.
-        rot = wp.quat_from_axis_angle(wp.vec3(1.0, 0.0, 0.0), -np.pi / 2)
+        rot = wp.quat_from_axis_angle(wp.vec3(0.0, 0.0, 1.0), np.pi)
 
         builder.add_cloth_mesh(
             pos=wp.vec3(0.0, 0.0, self.cfg.cloth_drop_height),
@@ -106,7 +110,7 @@ class DropClothEnv(DirectRLEnv):
             scale=1.0,
             vel=wp.vec3(0.0, 0.0, 0.0),
             vertices=vertices,
-            indices=indices,
+            indices=mesh_indices,
             density=0.02,
             tri_ke=_TRI_KE,
             tri_ka=_TRI_KA,

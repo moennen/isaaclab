@@ -208,6 +208,13 @@ class VBDSolverCfg(NewtonSolverCfg):
     iterations: int = 10
     """Number of VBD iterations per substep."""
 
+    integrate_with_external_rigid_solver: bool = False
+    """Whether rigid bodies are integrated by an external solver (one-way coupling).
+
+    Set to ``True`` when coupling cloth with a separate rigid-body solver
+    (e.g. ``SolverFeatherstone``) so that VBD only integrates the cloth particles.
+    """
+
     particle_enable_self_contact: bool = False
     """Whether to enable cloth self-contact."""
 
@@ -231,6 +238,27 @@ class VBDSolverCfg(NewtonSolverCfg):
 
     particle_edge_contact_buffer_size: int = 64
     """Preallocation size for each edge's edge-edge collision buffer."""
+
+    particle_topological_contact_filter_threshold: int = 2
+    """Maximum topological distance (in rings) below which self-contacts are discarded.
+
+    Only used when ``particle_enable_self_contact`` is ``True``.
+    Increase to suppress contacts between closely connected mesh elements.
+    Values > 3 significantly increase computation time.
+    """
+
+    particle_rest_shape_contact_exclusion_radius: float = 0.0
+    """World-space distance threshold for filtering topologically close primitives [m].
+
+    Candidate self-contacts whose rest-configuration separation is shorter than
+    this value are ignored. Only used when ``particle_enable_self_contact`` is ``True``.
+    """
+
+    rigid_contact_k_start: float = 1.0e2
+    """Initial stiffness seed for all rigid body contacts (body-body and body-particle) [N/m].
+
+    Used by the AVBD rigid contact solver. Increase to make rigid contacts stiffer.
+    """
 
     soft_contact_margin: float = 0.01
     """Soft-contact detection margin passed to the CollisionPipeline [m].
