@@ -47,6 +47,27 @@ def _require_newton_3dg(cfg) -> None:
     )
 
 
+def _ensure_newton_visualizer_show_particles(cfg) -> None:
+    """Ensure cfg.sim.visualizer_cfgs contains a Newton config with show_particles=True.
+
+    When visualizer_cfgs is None, SimulationContext creates defaults (show_particles=False).
+    We set or update the list so the context uses our Newton config with show_particles=True.
+    """
+    from isaaclab_visualizers.newton import NewtonVisualizerCfg
+
+    vcfgs = getattr(cfg.sim, "visualizer_cfgs", None)
+    vlist = (vcfgs if isinstance(vcfgs, list) else [vcfgs]) if vcfgs is not None else []
+    newton_cfg = next(
+        (v for v in vlist if getattr(v, "visualizer_type", None) == "newton"),
+        None,
+    )
+    if newton_cfg is not None:
+        if hasattr(newton_cfg, "show_particles"):
+            newton_cfg.show_particles = True
+        return
+    cfg.sim.visualizer_cfgs = vlist + [NewtonVisualizerCfg(show_particles=True)]
+
+
 def _scene_uses_simplicits_adapter(cfg) -> bool:
     """True if the scene config uses SimplicitsObjectAdapter for the object."""
     scene = getattr(cfg, "scene", None)
@@ -111,6 +132,10 @@ class Dexsuite3dgManagerBasedRLEnv(ManagerBasedRLEnv):
                 simplicits_preset = getattr(KukaAllegroPhysicsCfg(), "simplicits", None)
             if simplicits_preset is not None:
                 cfg.sim.physics = simplicits_preset
+            # Ensure a Newton visualizer config with show_particles=True exists so SimulationContext
+            # uses it instead of creating a default (which has show_particles=False). When
+            # visualizer_cfgs is None, the context creates configs via _create_default_visualizer_configs.
+            _ensure_newton_visualizer_show_particles(cfg)
         _require_newton_3dg(cfg)
         _apply_newton_manager_patch_for_3dg(cfg)
         super().__init__(cfg, **kwargs)
