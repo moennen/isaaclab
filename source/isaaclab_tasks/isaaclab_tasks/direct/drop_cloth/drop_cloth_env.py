@@ -22,6 +22,11 @@ from isaaclab.sim.spawners.from_files import GroundPlaneCfg, spawn_ground_plane
 
 from .drop_cloth_env_cfg import DropClothEnvCfg
 
+import logging
+logging.basicConfig(level=logging.INFO)
+
+logger = logging.getLogger(__name__)
+
 # ─── cloth mesh asset ────────────────────────────────────────────────────────
 _SHIRT_USD = os.path.join(
     os.path.dirname(nwt.__file__),
@@ -31,14 +36,15 @@ _SHIRT_USD = os.path.join(
 )
 
 # Cloth simulation parameters (meter scale)
+# Reference: newton/examples/cloth/example_cloth_franka.py (same mesh, cm-space values)
 _CLOTH_SCALE = 0.01  # USD vertices are in cm → convert to meters
-_TRI_KE = 1e3  # area-preserving stiffness [N/m²]
-_TRI_KA = 1e3  # area stiffness [N/m²]
-_TRI_KD = 1.5e-4  # area damping
-_BENDING_KE = 0.1  # bending stiffness [N]
-_BENDING_KD = 1e-3  # bending damping
-_PARTICLE_RADIUS = 0.008  # [m]
-_SOFT_CONTACT_KE = 1e4  # body–particle contact stiffness [N/m]
+_TRI_KE = 1e4  # area-preserving stiffness
+_TRI_KA = 1e4  # area stiffness
+_TRI_KD = 1.5e-6  # area damping (must be small — high value causes explosion)
+_BENDING_KE = 5.0  # bending stiffness
+_BENDING_KD = 1e-2  # bending damping
+_PARTICLE_RADIUS = 0.008  # [m] (= 0.8 cm, matches reference particle_radius=0.8)
+_SOFT_CONTACT_KE = 1e4  # body–particle contact stiffness
 _SOFT_CONTACT_KD = 1e-2  # body–particle contact damping
 
 
@@ -119,6 +125,7 @@ class DropClothEnv(DirectRLEnv):
         Called by NewtonManager after ``builder.finalize()`` and initial FK.
         Zeroes the edge rest angles (flat rest state) and sets soft-contact
         stiffness parameters for realistic body–cloth interaction.
+        Also snapshots the initial particle state for use in episode resets.
         """
         from isaaclab_newton.physics import NewtonManager
 
@@ -129,6 +136,12 @@ class DropClothEnv(DirectRLEnv):
         model.edge_rest_angle.zero_()
         model.soft_contact_ke = _SOFT_CONTACT_KE
         model.soft_contact_kd = _SOFT_CONTACT_KD
+
+        # Snapshot initial particle positions (after finalize + FK) for reset.
+        # Both state_0 and state_1 exist at this point (created in start_simulation).
+        state = NewtonManager._state_0
+        if state is not None and hasattr(state, "particle_q") and state.particle_q is not None:
+            self._init_particle_q = wp.clone(state.particle_q)
 
     # ─── RL interface (no-op — demo only) ────────────────────────────────────
 
@@ -146,6 +159,7 @@ class DropClothEnv(DirectRLEnv):
         return torch.zeros(self.num_envs, device=self.device)
 
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
+        logger.info("episode_length_buf: %d, max_episode_length: %d", self.episode_length_buf, self.max_episode_length)
         time_out = self.episode_length_buf >= self.max_episode_length - 1
         terminated = torch.zeros_like(time_out)
         return terminated, time_out
@@ -154,3 +168,28 @@ class DropClothEnv(DirectRLEnv):
         if env_ids is None or len(env_ids) == 0:
             return
         super()._reset_idx(env_ids)
+
+        if not hasattr(self, "_init_particle_q"):
+            return
+
+        from isaaclab_newton.physics import NewtonManager
+
+        # Reset particle positions and velocities in both states.
+        for state in (NewtonManager._state_0, NewtonManager._state_1):
+            if state is None:
+                continue
+            if state.particle_q is not None:
+                wp.copy(state.particle_q, self._init_particle_q)
+            if state.particle_qd is not None:
+                state.particle_qd.zero_()
+
+        # Zero VBD solver's internal particle buffers so the next step
+        # doesn't carry over stale inertial targets or displacements.
+        solver = NewtonManager._solver
+        if solver is not None:
+            for attr in ("particle_q_prev", "inertia", "pos_prev_collision_detection", "particle_displacements"):
+                buf = getattr(solver, attr, None)
+                if buf is not None:
+                    buf.zero_()
+            if getattr(solver, "truncation_ts", None) is not None:
+                solver.truncation_ts.fill_(1.0)

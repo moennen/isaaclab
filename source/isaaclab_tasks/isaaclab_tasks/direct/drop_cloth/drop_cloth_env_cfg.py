@@ -32,7 +32,7 @@ class DropClothPhysicsCfg(PresetCfg):
 class DropClothEnvCfg(DirectRLEnvCfg):
     # env
     decimation = 2
-    episode_length_s = 10.0
+    episode_length_s = 2.0
     # no RL actions; minimal observation space
     action_space = 0
     observation_space = 1
