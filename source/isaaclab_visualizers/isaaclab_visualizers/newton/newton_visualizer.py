@@ -318,6 +318,7 @@ class NewtonVisualizer(BaseVisualizer):
             self._viewer.show_contacts = self.cfg.show_contacts
             self._viewer.show_springs = self.cfg.show_springs
             self._viewer.show_com = self.cfg.show_com
+            self._viewer.show_particles = self.cfg.show_particles
 
             self._viewer.renderer.draw_shadows = self.cfg.enable_shadows
             self._viewer.renderer.draw_sky = self.cfg.enable_sky
