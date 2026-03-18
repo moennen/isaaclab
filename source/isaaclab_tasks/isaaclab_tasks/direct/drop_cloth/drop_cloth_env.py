@@ -16,6 +16,7 @@ import warp as wp
 from pxr import Usd, UsdGeom
 
 import newton
+import isaaclab.sim as sim_utils
 from isaaclab.envs import DirectRLEnv
 from isaaclab.physics import PhysicsEvent
 from isaaclab.sim.spawners.from_files import GroundPlaneCfg, spawn_ground_plane
@@ -64,6 +65,9 @@ class DropClothEnv(DirectRLEnv):
 
         # Ground plane
         spawn_ground_plane(prim_path="/World/ground", cfg=GroundPlaneCfg())
+
+        light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
+        light_cfg.func("/World/Light", light_cfg)
 
         # Clone environments (no robots to replicate)
         self.scene.clone_environments(copy_from_source=False)
@@ -147,6 +151,58 @@ class DropClothEnv(DirectRLEnv):
         if state is not None and hasattr(state, "particle_q") and state.particle_q is not None:
             self._init_particle_q = wp.clone(state.particle_q)
 
+        # Create a UsdGeom.Mesh prim so Kit's RTX viewport can render the cloth.
+        # The prim lives at /World/cloth_vis (outside env namespaces so it isn't cloned).
+        self._create_cloth_vis_prim(model)
+
+    def _create_cloth_vis_prim(self, model) -> None:
+        """Create a UsdGeom.Mesh prim at /World/cloth_vis for Kit viewport rendering.
+
+        The prim is authored once with the cloth topology; its ``points`` attribute
+        is updated every render step from the Newton particle state via
+        :meth:`_update_cloth_vis`.
+        """
+        from isaaclab.sim.utils.stage import get_current_stage
+        from pxr import Gf, Sdf, Vt
+
+        stage = get_current_stage()
+        prim_path = "/World/cloth_vis"
+
+        # Build face topology from model.tri_indices (Nx3 flat array on CPU).
+        tri_idx = model.tri_indices.numpy()  # shape (num_tris * 3,) or (num_tris, 3)
+        tri_idx = tri_idx.reshape(-1, 3)
+        face_vertex_indices = Vt.IntArray(tri_idx.flatten().tolist())
+        face_vertex_counts = Vt.IntArray([3] * len(tri_idx))
+
+        # Initial vertex positions from particle state.
+        from isaaclab_newton.physics import NewtonManager
+
+        pts_np = NewtonManager._state_0.particle_q.numpy()  # (N, 3)
+        points = Vt.Vec3fArray([Gf.Vec3f(float(p[0]), float(p[1]), float(p[2])) for p in pts_np])
+
+        mesh = UsdGeom.Mesh.Define(stage, Sdf.Path(prim_path))
+        mesh.GetPointsAttr().Set(points)
+        mesh.GetFaceVertexIndicesAttr().Set(face_vertex_indices)
+        mesh.GetFaceVertexCountsAttr().Set(face_vertex_counts)
+        mesh.GetSubdivisionSchemeAttr().Set(UsdGeom.Tokens.none)
+
+        self._cloth_vis_prim = mesh
+        self._cloth_particle_count = len(pts_np)
+
+    def _update_cloth_vis(self) -> None:
+        """Write current Newton particle positions into the Kit cloth mesh prim."""
+        if not hasattr(self, "_cloth_vis_prim"):
+            return
+        from isaaclab_newton.physics import NewtonManager
+        from pxr import Gf, Vt
+
+        state = NewtonManager._state_0
+        if state is None or state.particle_q is None:
+            return
+        pts_np = state.particle_q.numpy()
+        points = Vt.Vec3fArray([Gf.Vec3f(float(p[0]), float(p[1]), float(p[2])) for p in pts_np])
+        self._cloth_vis_prim.GetPointsAttr().Set(points)
+
     # ─── RL interface (no-op — demo only) ────────────────────────────────────
 
     def _pre_physics_step(self, actions: torch.Tensor) -> None:
@@ -156,7 +212,7 @@ class DropClothEnv(DirectRLEnv):
         pass
 
     def _get_observations(self) -> dict:
-        # Return a placeholder observation (1-dim zero tensor per env)
+        self._update_cloth_vis()
         return {"policy": torch.zeros(self.num_envs, 1, device=self.device)}
 
     def _get_rewards(self) -> torch.Tensor:

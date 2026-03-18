@@ -34,8 +34,8 @@ class DropClothPhysicsCfg(PresetCfg):
             rigid_contact_k_start=soft_contact_ke,
         ),
         num_substeps=10,
-        # use_cuda_graph=False,  # Disable for debugging; re-enable once working
-        use_cuda_graph=True,
+        use_cuda_graph=False,  # Disable for debugging; re-enable once working
+        # use_cuda_graph=True,
     )
     newton: NewtonCfg = default
 

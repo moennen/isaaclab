@@ -309,18 +309,24 @@ class NewtonManager(PhysicsManager):
             import usdrt
 
             body_paths = getattr(cls._model, "body_label", None) or getattr(cls._model, "body_key", None)
-            if body_paths is None:
-                raise RuntimeError("NewtonManager: model has no body_label/body_key, skipping USD/Fabric sync for RTX.")
-            cls._usdrt_stage = get_current_stage(fabric=True)
-            for i, prim_path in enumerate(body_paths):
-                prim = cls._usdrt_stage.GetPrimAtPath(prim_path)
-                prim.CreateAttribute(cls._newton_index_attr, usdrt.Sdf.ValueTypeNames.UInt, True)
-                prim.GetAttribute(cls._newton_index_attr).Set(i)
-                xformable_prim = usdrt.Rt.Xformable(prim)
-                if not xformable_prim.HasWorldXform():
-                    xformable_prim.SetWorldXformFromUsd()
+            if not body_paths:
+                logger.warning(
+                    "NewtonManager: model has no rigid bodies (body_label/body_key is empty). "
+                    "USD/Fabric body sync for RTX is skipped. "
+                    "Particle-only scenes (e.g. cloth) must register their own USD mesh update."
+                )
+                cls._usdrt_stage = None
+            else:
+                cls._usdrt_stage = get_current_stage(fabric=True)
+                for i, prim_path in enumerate(body_paths):
+                    prim = cls._usdrt_stage.GetPrimAtPath(prim_path)
+                    prim.CreateAttribute(cls._newton_index_attr, usdrt.Sdf.ValueTypeNames.UInt, True)
+                    prim.GetAttribute(cls._newton_index_attr).Set(i)
+                    xformable_prim = usdrt.Rt.Xformable(prim)
+                    if not xformable_prim.HasWorldXform():
+                        xformable_prim.SetWorldXformFromUsd()
 
-            cls.sync_transforms_to_usd()
+                cls.sync_transforms_to_usd()
 
     @classmethod
     def instantiate_builder_from_stage(cls):
