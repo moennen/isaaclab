@@ -170,7 +170,7 @@ class SimplicitsObjectAdapter(AssetBase):
         per_env = getattr(Dexsuite3dgNewtonManager, "_per_env_particle_ranges", None)
         if not per_env:
             raise RuntimeError(
-                "SimplicitsObjectAdapter: _per_env_particle_ranges not set. "
+                "[DexSuite 3DG : Newton :] SimplicitsObjectAdapter: _per_env_particle_ranges not set. "
                 "Ensure simplicits_enabled and physics has been started."
             )
         self._num_instances = len(per_env)
@@ -214,7 +214,7 @@ class SimplicitsObjectAdapter(AssetBase):
             {"count": self._num_instances, "link_names": ["object"]},
         )()
         logger.debug(
-            "SimplicitsObjectAdapter initialized: num_envs=%s, root_pos_w/root_quat_w from particle CoM",
+            "[DexSuite 3DG : Newton :] SimplicitsObjectAdapter initialized: num_envs=%s, root_pos_w/root_quat_w from particle CoM",
             self._num_instances,
         )
 

@@ -170,6 +170,9 @@ class Dexsuite3dgNewtonManager(NewtonManager):
             env_transforms.append(torch.eye(4, device=vertices.device, dtype=torch.float32))
         logger.debug("simplicits mode enabled: building model for %s envs", num_envs)
         with Timer(name="dexsuite_3dg_simplicits_build", msg="Simplicits model build took:"):
+            logger.debug(
+                f"[DexSuite 3DG : Newton :] Starting Simplicits model build with {cls._up_axis} up axis and gravity {cls._gravity_vector}"
+            )
             model, per_env_ranges = build_multi_env_simplicits_model(
                 stage=stage,
                 env_paths=env_paths,
