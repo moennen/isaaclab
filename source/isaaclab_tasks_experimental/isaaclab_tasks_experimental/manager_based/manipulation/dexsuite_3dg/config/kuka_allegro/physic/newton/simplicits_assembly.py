@@ -3,10 +3,10 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""Single- and multi-env SimplicitsModelBuilder assembly (Step 3/4).
+"""Multi-env SimplicitsModelBuilder assembly (Step 3/4).
 
 The builder and resulting model are owned by the extended Newton manager (Step 5).
-This module provides build_single_env_simplicits_model and build_multi_env_simplicits_model.
+Use :func:`build_multi_env_simplicits_model` with one env for single-env cases.
 """
 
 from __future__ import annotations
@@ -30,9 +30,11 @@ logger = logging.getLogger("dexsuite_3dg.simplicits.assembly")
 try:
     from kaolin.experimental.newton.builder import SimplicitsModelBuilder
     from kaolin.experimental.newton.collisions import SimplicitsParticleNewtonShapeSoftContact
+    from kaolin.experimental.newton.model import SimplicitsModel
 except ImportError:
     SimplicitsModelBuilder = None  # type: ignore[assignment]
     SimplicitsParticleNewtonShapeSoftContact = None  # type: ignore[assignment]
+    SimplicitsModel = None  # type: ignore[assignment]
 
 
 def _resolve_collision_particle_radius(
@@ -48,105 +50,6 @@ def _resolve_collision_particle_radius(
     if cfg_radius is not None and cfg_radius > 0.0:
         return float(cfg_radius)
     return compute_collision_particle_radius_from_mesh(vertices, num_samples)
-
-
-def build_single_env_simplicits_model(
-    stage: Any,
-    env_path: str,
-    object_relative_path: str,
-    vertices: torch.Tensor,
-    faces: torch.Tensor,
-    simplicits_cfg: Any,
-    init_transform: torch.Tensor | None = None,
-    device: str = "cuda",
-    up_axis: str = "Z",
-    solver_type: str | None = None,
-    num_qp: int | None = None,
-    collision_particle_radius: float | None = None,
-    detection_ratio: float = 1.5,
-    gravity: float = 9.81,
-    verbose: bool = False,
-) -> Any:
-    """Build a single-env SimplicitsModel: rigid proto (Step 2) + one Simplicits object (Step 1), then finalize.
-
-    Order: add rigid proto (per-env only), add Simplicits object at init_transform,
-    add_simplicits_collisions, add_ground_plane, finalize(device). No cloning; one world.
-
-    Args:
-        stage: USD stage (e.g. get_current_stage()).
-        env_path: Env root path for rigid proto (e.g. /World/envs/env_0).
-        object_relative_path: Prim name to exclude from proto (e.g. Object).
-        vertices: Mesh vertices for the Simplicits object, shape (V, 3).
-        faces: Mesh faces, shape (F, 3).
-        simplicits_cfg: SimplicitsObjectCfg for the mesh→Simplicits factory.
-        init_transform: 4x4 or 3x4 initial transform for the Simplicits object; identity if None.
-        device: Target device for finalize.
-        up_axis: Newton up axis (e.g. Z).
-        solver_type: Solver type for rigid proto (e.g. mujoco_warp); None to skip solver-specific registration.
-        num_qp: Quadrature points for Simplicits object; defaults to simplicits_cfg.num_samples.
-        collision_particle_radius: If None, uses cfg or computed from mesh extent and num_samples.
-        detection_ratio: Passed to add_simplicits_collisions.
-        gravity: Gravity magnitude [m/s²] (positive; applied along negative up axis).
-        verbose: If True, log assembly steps.
-
-    Returns:
-        SimplicitsModel (from Kaolin) after finalize, ready for state() and SimplicitsSolver.step.
-    """
-    if SimplicitsModelBuilder is None:
-        raise ImportError(
-            "Kaolin experimental Newton (SimplicitsModelBuilder) is required for assembly. "
-            "Install kaolin with newton support."
-        )
-
-    if not isinstance(simplicits_cfg, SimplicitsObjectCfg):
-        raise TypeError("simplicits_cfg must be SimplicitsObjectCfg")
-
-    axis = Axis.from_string(up_axis) if isinstance(up_axis, str) else up_axis
-    n_qp = num_qp if num_qp is not None else simplicits_cfg.num_samples
-    collision_radius = _resolve_collision_particle_radius(collision_particle_radius, simplicits_cfg, vertices, n_qp)
-
-    # Step 2: rigid proto (per-env only)
-    proto = build_rigid_proto_excluding_object(
-        stage,
-        env_path=env_path,
-        object_relative_path=object_relative_path,
-        up_axis=up_axis,
-        solver_type=solver_type,
-    )
-    if verbose:
-        logger.debug("assembly: built rigid proto for env_path=%s", env_path)
-
-    # Step 1: rigid Simplicits object from mesh
-    sim_obj = create_rigid_simplicits_object_from_mesh(vertices, faces, simplicits_cfg, device=device)
-    if verbose:
-        logger.debug("assembly: created Simplicits object, num_qp=%s", n_qp)
-
-    if init_transform is None:
-        init_transform = torch.eye(4, device=vertices.device, dtype=vertices.dtype)
-    elif init_transform.dim() == 2 and init_transform.shape[0] == 3:
-        # 3x4 -> 4x4
-        row = torch.zeros(1, 4, device=init_transform.device, dtype=init_transform.dtype)
-        row[0, 3] = 1.0
-        init_transform = torch.cat([init_transform, row], dim=0)
-
-    # Assemble SimplicitsModelBuilder
-    smb = SimplicitsModelBuilder(up_axis=axis, gravity=-float(gravity))
-    smb.add_builder(proto)
-    smb.add_simplicits_object(sim_obj, num_qp=n_qp, init_transform=init_transform)
-    smb.add_simplicits_collisions(
-        collision_particle_radius=collision_radius,
-        detection_ratio=detection_ratio,
-    )
-    smb.add_ground_plane()
-
-    model = smb.finalize(device=device, requires_grad=False)
-    if verbose:
-        logger.info(
-            "assembly: finalize done simplicits_particle_start=%s simplicits_particle_end=%s",
-            model.simplicits_particle_start,
-            model.simplicits_particle_end,
-        )
-    return model
 
 
 def build_multi_env_simplicits_model(
@@ -251,6 +154,7 @@ def build_multi_env_simplicits_model(
         solver_type=solver_type,
         env_proto_xforms=env_proto_xforms,
         particle_radius=collision_radius,
+        device=str(device) if device is not None else "cuda",
     )
     smb.add_ground_plane()
 
@@ -292,9 +196,21 @@ class _MultiWorldSimplicitsModelBuilder:
         solver_type: str | None,
         env_proto_xforms: list[tuple[tuple[float, float, float], tuple[float, float, float, float]]] | None,
         particle_radius: float = 0.05,
+        device: str = "cuda",
     ) -> None:
         """Setup scene to get sim_pts, then add one Newton world per env: rigid proto + that env's particle slice."""
-        scene = self._base.model.simplicits_scene
+        if SimplicitsModel is None:
+            raise ImportError("Kaolin SimplicitsModel required for multi-env assembly")
+        pending = getattr(self._base, "_pending_objects", [])
+        if not pending:
+            return
+        # Kaolin SimplicitsModelBuilder defers add_simplicits_object until finalize(); there is no
+        # .model on the builder beforehand. Mirror finalize()'s first phase to materialize sim_pts.
+        self._base.model = SimplicitsModel(device)
+        model = self._base.model
+        for sim_object, num_qp, init_transform, is_kinematic in pending:
+            model.simplicits_scene.add_object(sim_object, num_qp, init_transform, is_kinematic)
+        scene = model.simplicits_scene
         if len(scene.sim_obj_dict) == 0:
             return
         # Scene setup so sim_pts is built
@@ -363,6 +279,9 @@ class _MultiWorldSimplicitsModelBuilder:
         """Finalize Newton model and return (model, per_env_particle_ranges)."""
         if SimplicitsParticleNewtonShapeSoftContact is None:
             raise ImportError("Kaolin SimplicitsParticleNewtonShapeSoftContact required")
+        if not getattr(self._base, "model", None):
+            model = self._base.finalize(device=device, requires_grad=requires_grad)
+            return model, []
         scene = self._base.model.simplicits_scene
         has_simplicits = len(scene.sim_obj_dict) > 0
         if not has_simplicits:

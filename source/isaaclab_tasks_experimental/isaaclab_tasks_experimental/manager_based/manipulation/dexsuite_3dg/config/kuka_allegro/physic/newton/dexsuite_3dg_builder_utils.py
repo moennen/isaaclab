@@ -97,14 +97,14 @@ def build_rigid_proto_excluding_object(
     # Per-env content only: add each direct child of env_path that is not the Object
     env_prim = stage.GetPrimAtPath(env_path)
     if not env_prim.IsValid():
-        logger.warning("builder_utils: env_path %s is not valid on stage", env_path)
+        logger.warning("[DexSuite 3DG : Newton :] builder_utils: env_path %s is not valid on stage", env_path)
         return builder
 
     object_path = f"{env_path}/{object_relative_path}"
     for child in env_prim.GetChildren():
         child_name = child.GetName()
         if child_name == object_relative_path:
-            logger.debug("builder_utils: skipping Object prim %s", object_path)
+            logger.debug("[DexSuite 3DG : Newton :] builder_utils: skipping Object prim %s", object_path)
             continue
         child_path = child.GetPath().pathString
         builder.add_usd(
@@ -117,7 +117,7 @@ def build_rigid_proto_excluding_object(
         if verbose:
             body_list, art_list = get_builder_body_articulation_labels(builder)
             logger.debug(
-                "builder_utils: after add_usd root_path=%s body_count=%s articulation_count=%s",
+                "[DexSuite 3DG : Newton :] builder_utils: after add_usd root_path=%s body_count=%s articulation_count=%s",
                 child_path,
                 len(body_list),
                 len(art_list),

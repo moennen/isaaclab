@@ -3,7 +3,7 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""Step 3 tests: single-env SimplicitsModelBuilder assembly and one SimplicitsSolver step."""
+"""Tests: SimplicitsModelBuilder assembly (one env via multi-env API) and one SimplicitsSolver step."""
 
 from __future__ import annotations
 
@@ -17,9 +17,7 @@ from kaolin.experimental.newton.solver import SimplicitsSolver
 from pxr import Usd, UsdGeom
 
 from ....config.kuka_allegro.physic.kaolin import SimplicitsObjectCfg
-from ....config.kuka_allegro.physic.newton.simplicits_assembly import (
-    build_single_env_simplicits_model,
-)
+from ....config.kuka_allegro.physic.newton.simplicits_assembly import build_multi_env_simplicits_model
 
 
 def _minimal_stage():
@@ -65,26 +63,26 @@ def _cube_mesh(device: torch.device, dtype: torch.dtype):
 
 
 class TestSimplicitsAssembly:
-    """Step 3: build SimplicitsModel (rigid proto + one Simplicits object), finalize, one step."""
+    """Build SimplicitsModel (rigid proto + one Simplicits object), finalize, one step."""
 
     def test_build_and_finalize(self):
-        """Build single-env SimplicitsModelBuilder, finalize; model has simplicits particle range."""
+        """Build SimplicitsModel via multi-env API with one env; model has simplicits particle range."""
         device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
         stage = _minimal_stage()
         vertices, faces = _cube_mesh(device, torch.float32)
         cfg = SimplicitsObjectCfg(num_samples=200)
 
-        model = build_single_env_simplicits_model(
+        model, ranges = build_multi_env_simplicits_model(
             stage,
-            env_path="/World/envs/env_0",
+            env_paths=["/World/envs/env_0"],
             object_relative_path="Object",
-            vertices=vertices,
-            faces=faces,
+            env_meshes=[(vertices, faces)],
             simplicits_cfg=cfg,
             device=str(device),
         )
 
         assert model is not None
+        assert len(ranges) == 1
         start = model.simplicits_particle_start
         end = model.simplicits_particle_end
         assert start is not None and end is not None
@@ -97,12 +95,11 @@ class TestSimplicitsAssembly:
         vertices, faces = _cube_mesh(device, torch.float32)
         cfg = SimplicitsObjectCfg(num_samples=150)
 
-        model = build_single_env_simplicits_model(
+        model, _ = build_multi_env_simplicits_model(
             stage,
-            env_path="/World/envs/env_0",
+            env_paths=["/World/envs/env_0"],
             object_relative_path="Object",
-            vertices=vertices,
-            faces=faces,
+            env_meshes=[(vertices, faces)],
             simplicits_cfg=cfg,
             device=str(device),
         )

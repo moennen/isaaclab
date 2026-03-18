@@ -44,9 +44,25 @@ class KukaAllegroPhysicsCfg(PresetCfg):
     newton = default
     simplicits = Dexsuite3dgNewtonCfg(
         simplicits_enabled=True,
-        simplicits_cfg=SimplicitsObjectCfg(num_samples=50),
+        simplicits_cfg=SimplicitsObjectCfg(
+            num_samples=256,
+            youngs_modulus=5.0e7,
+            poisson_ratio=0.45,
+            density=500.0,
+        ),
+        use_cuda_graph=False,
+        num_substeps=4,
     )
-    """Newton with Simplicits spawn object (rigid particles). Use env.sim.physics=simplicits to enable."""
+    """Newton with the spawn object as Simplicits particles (``env.sim.physics=simplicits``).
+
+    - **CUDA graph:** Off so the two-phase step (rigid then Simplicits) runs every tick.
+    - **Object:** ``SimplicitsObjectCfg`` — 256 surface samples, Young's modulus 5e7 Pa,
+      density 500 kg/m³ (stiffer / fewer samples than class defaults). Override for tuning.
+    - **Integrator:** ``num_substeps=4`` for the rigid phase each simulation step; Simplicits
+      runs once per step after the rigid substeps complete.
+    - **Reset:** ``SimplicitsObjectAdapter`` forwards root pose/velocity to the particle
+      state so episode resets align with ``reset_root_state_uniform`` (rigid-equivalent pose).
+    """
     physx = PhysxCfg(
         bounce_threshold_velocity=0.01,
         gpu_max_rigid_patch_count=4 * 5 * 2**15,

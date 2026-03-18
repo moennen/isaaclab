@@ -91,7 +91,8 @@ class SceneCfg(InteractiveSceneCfg):
     object: RigidObjectCfg = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/Object",
         spawn=ObjectCfg(),  # type: ignore
-        init_state=RigidObjectCfg.InitialStateCfg(pos=(-0.55, 0.1, 0.35)),
+        # Table center xy; z = table top (0.235 + 0.02) + 0.3 m [m] in env frame.
+        init_state=RigidObjectCfg.InitialStateCfg(pos=(-0.55, 0.0, 0.555)),
     )
 
     # table
@@ -297,14 +298,14 @@ class EventCfg:
         mode="reset",
         params={
             "pose_range": {
-                "x": [-0.2, 0.2],
-                "y": [-0.2, 0.2],
-                "z": [0.0, 0.4],
-                "roll": [-3.14, 3.14],
-                "pitch": [-3.14, 3.14],
-                "yaw": [-3.14, 3.14],
+                "x": [0.0, 0.0],
+                "y": [0.0, 0.0],
+                "z": [0.0, 0.0],
+                "roll": [0.0, 0.0],
+                "pitch": [0.0, 0.0],
+                "yaw": [0.0, 0.0],
             },
-            "velocity_range": {"x": [-0.0, 0.0], "y": [-0.0, 0.0], "z": [-0.0, 0.0]},
+            "velocity_range": {"x": [0.0, 0.0], "y": [0.0, 0.0], "z": [0.0, 0.0]},
             "asset_cfg": SceneEntityCfg("object"),
         },
     )

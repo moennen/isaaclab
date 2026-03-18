@@ -126,7 +126,7 @@ def create_rigid_simplicits_object_from_mesh(
 
     if verbose:
         logger.info(
-            "simplicits_from_mesh: verts=%s faces=%s samples=%s approx_vol=%.6f",
+            "[DexSuite 3DG : Kaolin :] simplicits_from_mesh: verts=%s faces=%s samples=%s approx_vol=%.6f",
             vertices.shape[1],
             faces.shape[0],
             n,
