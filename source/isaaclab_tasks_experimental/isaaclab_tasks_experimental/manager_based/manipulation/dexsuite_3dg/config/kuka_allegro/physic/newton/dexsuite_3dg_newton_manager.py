@@ -280,6 +280,25 @@ class Dexsuite3dgNewtonManager(NewtonManager):
                 cls._state_0.clear_forces()
 
         # Phase 2: collide (rigid + Simplicits particles) then SimplicitsSolver
+        #
+        # State layout entering phase 2:
+        #   state_0 — fully up-to-date: rigid fields (joint_q, body_q, joint_qd, …)
+        #             advanced by phase 1; Simplicits fields (sim_z, particle_q, …)
+        #             still hold values from the *previous* frame.
+        #   state_1 — untouched since model.state() initialisation: rigid fields
+        #             are at their initial values; Simplicits fields are stale.
+        #
+        # SimplicitsSolver.step(state_0 → state_1) reads sim_z / sim_z_dot from
+        # state_0, runs one Simplicits Newton step, then writes the four updated
+        # Simplicits fields into state_1:
+        #   state_1.sim_z, state_1.sim_z_dot          (reduced DOFs + velocities)
+        #   state_1.particle_q, state_1.particle_qd   (world-space positions / vel)
+        # Rigid fields in state_1 are NOT written by the Simplicits solver and
+        # therefore remain at their stale initial values.
+        #
+        # After the step we must NOT use state_0.assign(state_1) — that would copy
+        # the stale rigid fields from state_1 back onto the correctly-advanced
+        # state_0.  Instead we copy only the four Simplicits fields (see below).
         with wp.ScopedDevice(PhysicsManager._device):
             contacts = cls._model.collide(cls._state_0)
             cls._simplicits_solver.step(
@@ -289,7 +308,28 @@ class Dexsuite3dgNewtonManager(NewtonManager):
                 contacts,
                 cls._solver_dt,
             )
-            cls._state_0.assign(cls._state_1)
+            # Copy only the Simplicits-updated fields from state_1 back to state_0.
+            # Using state_0.assign(state_1) would overwrite rigid body fields (joint_q,
+            # body_q, etc.) with stale initial values since state_1 is never updated by
+            # the rigid solver step.
+            wp.copy(cls._state_0.sim_z, cls._state_1.sim_z)
+            wp.copy(cls._state_0.sim_z_dot, cls._state_1.sim_z_dot)
+            _s_start = cls._model.simplicits_particle_start
+            _s_end = cls._model.simplicits_particle_end
+            wp.copy(
+                dest=cls._state_0.particle_q,
+                src=cls._state_1.particle_q,
+                dest_offset=_s_start,
+                src_offset=_s_start,
+                count=_s_end - _s_start,
+            )
+            wp.copy(
+                dest=cls._state_0.particle_qd,
+                src=cls._state_1.particle_qd,
+                dest_offset=_s_start,
+                src_offset=_s_start,
+                count=_s_end - _s_start,
+            )
             cls._state_0.clear_forces()
 
         if cls._report_contacts:
