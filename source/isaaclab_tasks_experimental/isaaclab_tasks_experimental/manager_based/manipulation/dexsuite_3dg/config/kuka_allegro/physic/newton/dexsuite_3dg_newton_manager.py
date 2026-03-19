@@ -23,11 +23,15 @@ from isaaclab_newton.physics import NewtonManager
 
 from isaaclab.physics import PhysicsManager
 from isaaclab.sim.utils.stage import get_current_stage
-from isaaclab.utils.math import quat_from_matrix
+from isaaclab.utils.math import matrix_from_quat, quat_from_matrix
 from isaaclab.utils.timer import Timer
 
 from ..kaolin import SimplicitsObjectCfg
-from ..mesh_from_usd import get_vertices_faces_from_prim_path
+from ..mesh_from_usd import (
+    get_geom_world_transform_4x4,
+    get_vertices_faces_from_prim_path,
+    transform_points_mat4,
+)
 from .dexsuite_3dg_newton_cfg import Dexsuite3dgNewtonCfg
 from .simplicits_assembly import build_multi_env_simplicits_model
 
@@ -121,6 +125,13 @@ class Dexsuite3dgNewtonManager(NewtonManager):
     _simplicits_solver: Any = None
     _per_env_particle_ranges: list[tuple[int, int]] | None = None
     _particle_rest_q: torch.Tensor | None = None
+    #: ``inv(T_build)`` per env [num_envs, 4, 4]; T_build = Object geom world matrix at model build.
+    _simplicits_T_build_inv: torch.Tensor | None = None
+    # World-space Simplicits particle positions immediately after build (same indexing as
+    # ``state.particle_q``). Never updated: each reset rigid-teleports via
+    # ``p_new = T_reset @ T_build_inv @ p_build`` using the per-env slice of this tensor as
+    # ``p_build``.
+    _simplicits_particle_q_build: torch.Tensor | None = None
 
     @classmethod
     def initialize(cls, sim_context: SimulationContext) -> None:
@@ -156,23 +167,28 @@ class Dexsuite3dgNewtonManager(NewtonManager):
             )
         num_envs = len(env_paths)
         env_meshes = []
+        # Per-env geom world transform (column-vector: p_w = M[:3,:3] @ p_l + M[:3,3]).
+        # Passed to Kaolin as init_transform and stored for rigid-teleport reset (T_build_inv).
         env_transforms = []
-        for _, env_path in enumerate(env_paths):
+        for env_path in env_paths:
             obj_path = f"{env_path}/{_OBJECT_RELATIVE_PATH}"
             try:
-                vertices, faces = get_vertices_faces_from_prim_path(stage, obj_path, device=device, dtype=torch.float32)
+                vertices_local, faces = get_vertices_faces_from_prim_path(
+                    stage, obj_path, device=device, dtype=torch.float32
+                )
+                world_from_local = get_geom_world_transform_4x4(stage, obj_path, device=device, dtype=torch.float32)
             except KeyError as e:
                 raise RuntimeError(
                     f"Simplicits enabled but could not get object mesh from {obj_path}. "
                     "Ensure the Object prim has Mesh or primitive geometry."
                 ) from e
-            env_meshes.append((vertices, faces))
-            env_transforms.append(torch.eye(4, device=vertices.device, dtype=torch.float32))
-        logger.debug("simplicits mode enabled: building model for %s envs", num_envs)
+            env_meshes.append((vertices_local, faces))
+            env_transforms.append(world_from_local.clone())
+        T_stacked = torch.stack(env_transforms)
+        cls._simplicits_T_build_inv = torch.linalg.inv(T_stacked.to(torch.float64)).to(
+            device=device, dtype=torch.float32
+        )
         with Timer(name="dexsuite_3dg_simplicits_build", msg="Simplicits model build took:"):
-            logger.debug(
-                f"[DexSuite 3DG : Newton :] Starting Simplicits model build with {cls._up_axis} up axis and gravity {cls._gravity_vector}"
-            )
             model, per_env_ranges = build_multi_env_simplicits_model(
                 stage=stage,
                 env_paths=env_paths,
@@ -186,20 +202,16 @@ class Dexsuite3dgNewtonManager(NewtonManager):
                 solver_type="mujoco_warp",
                 collision_particle_radius=simplicits_cfg.collision_particle_radius,
                 gravity=abs(cls._gravity_vector[2]) if cls._gravity_vector[2] != 0 else 9.81,
-                verbose=logger.isEnabledFor(logging.DEBUG),
             )
         cls._per_env_particle_ranges = per_env_ranges
         wrapper = _SimplicitsModelBuilderWrapper(model)
         cls._builder = wrapper
         cls._num_envs = num_envs
         super().start_simulation()
-        # Cache canonical (rest) particle positions for rotation-from-rest in get_simplicits_object_pose.
-        cls._particle_rest_q = wp.to_torch(cls._state_0.particle_q).clone().float()
-        logger.info(
-            "Simplicits model ready: %s envs, particle ranges %s",
-            num_envs,
-            per_env_ranges,
-        )
+        # Build-time particle layout for rigid reset; rest pose for Kabsch (updated each reset).
+        pq0 = wp.to_torch(cls._state_0.particle_q).clone().float()
+        cls._simplicits_particle_q_build = pq0.clone()
+        cls._particle_rest_q = pq0.clone()
 
     @classmethod
     def initialize_solver(cls) -> None:
@@ -207,7 +219,6 @@ class Dexsuite3dgNewtonManager(NewtonManager):
         super().initialize_solver()
         if _simplicits_enabled() and cls._model is not None and SimplicitsSolver is not None:
             cls._simplicits_solver = SimplicitsSolver(cls._model)
-            logger.debug("SimplicitsSolver added (two-phase step)")
 
     @classmethod
     def _simulate(cls) -> None:
@@ -376,9 +387,109 @@ class Dexsuite3dgNewtonManager(NewtonManager):
         return wp.from_torch(lin_vel_t.contiguous(), dtype=wp.vec3f)
 
     @classmethod
+    def apply_simplicits_particles_pose_reset(
+        cls,
+        env_ids: torch.Tensor | Any,
+        root_pose: torch.Tensor,
+    ) -> None:
+        """Rigid-teleport Simplicits particles to match MDP object root pose after reset.
+
+        For each env, ``p_new = T_reset @ T_build^{-1} @ p_build`` where ``p_build`` are
+        build-time particle positions and ``T_reset`` is the 4x4 from ``root_pose``
+        (pos + quat wxyz). Assumes Object geom world frame matches root link frame.
+
+        Args:
+            env_ids: Env indices (1D), same length as ``root_pose`` leading dim.
+            root_pose: (N, 7) world pose: position [m] then quaternion **(x,y,z,w)** (same as
+                :meth:`reset_root_state_uniform` / rigid ``write_root_pose_to_sim_index``).
+        """
+        if not _simplicits_enabled():
+            return
+        if cls._per_env_particle_ranges is None:
+            return
+        if cls._simplicits_particle_q_build is None:
+            return
+        if cls._simplicits_T_build_inv is None:
+            return
+        if cls._state_0 is None:
+            return
+        pq_dev = cls._state_0.particle_q
+        if pq_dev is None or pq_dev.ptr is None:
+            return
+        env_ids_t = torch.as_tensor(env_ids, device=root_pose.device).long().reshape(-1)
+        n = env_ids_t.shape[0]
+        if root_pose.shape[0] != n:
+            raise ValueError("root_pose batch dim must match len(env_ids)")
+        device = str(PhysicsManager._device)
+        T_inv = cls._simplicits_T_build_inv.to(device=device, dtype=torch.float32)
+        p_build = cls._simplicits_particle_q_build.to(device=device, dtype=torch.float32)
+        R = matrix_from_quat(root_pose[:, 3:7].to(device=device, dtype=torch.float32))
+        t = root_pose[:, :3].to(torch.float32)
+        T_reset = torch.eye(4, device=device, dtype=torch.float32).unsqueeze(0).expand(n, -1, -1).clone()
+        T_reset[:, :3, :3] = R
+        T_reset[:, :3, 3] = t
+        pq = wp.to_torch(pq_dev).float().clone()
+        for k in range(n):
+            e = int(env_ids_t[k].item())
+            start, end = cls._per_env_particle_ranges[e]
+            if start >= end:
+                continue
+            delta = T_reset[k] @ T_inv[e]
+            pts = p_build[start:end]
+            pq[start:end] = transform_points_mat4(pts, delta)
+        pq_w = wp.from_torch(pq.contiguous(), dtype=wp.vec3f)
+        wp.copy(pq_dev, pq_w)
+        if cls._state_1 is not None and cls._state_1.particle_q is not None and cls._state_1.particle_q.ptr:
+            wp.copy(cls._state_1.particle_q, pq_w)
+        cls._particle_rest_q = pq.clone()
+
+    @classmethod
+    def apply_simplicits_particles_velocity_reset(
+        cls,
+        env_ids: torch.Tensor | Any,
+        root_velocity: torch.Tensor,
+    ) -> None:
+        """Set particle velocities from rigid root twist (lin + ang) about particle CoM.
+
+        Args:
+            env_ids: Env indices (1D), same length as ``root_velocity`` leading dim.
+            root_velocity: (N, 6) [m/s, rad/s] linear then angular (world).
+        """
+        if not _simplicits_enabled() or cls._per_env_particle_ranges is None or cls._state_0 is None:
+            return
+        pqd_dev = getattr(cls._state_0, "particle_qd", None)
+        if pqd_dev is None or pqd_dev.ptr is None:
+            return
+        env_ids_t = torch.as_tensor(env_ids, device=root_velocity.device).long().reshape(-1)
+        n = env_ids_t.shape[0]
+        if root_velocity.shape[0] != n or root_velocity.shape[-1] != 6:
+            raise ValueError("root_velocity must be (N, 6)")
+        device = str(PhysicsManager._device)
+        pqd = wp.to_torch(pqd_dev).float().clone()
+        pq = wp.to_torch(cls._state_0.particle_q).float()
+        v_lin = root_velocity[:, :3].to(device=device, dtype=torch.float32)
+        omega = root_velocity[:, 3:6].to(device=device, dtype=torch.float32)
+        for k in range(n):
+            e = int(env_ids_t[k].item())
+            start, end = cls._per_env_particle_ranges[e]
+            if start >= end:
+                continue
+            rel = pq[start:end] - pq[start:end].mean(dim=0, keepdim=True)
+            w = omega[k].unsqueeze(0).expand_as(rel)
+            pqd[start:end] = v_lin[k].unsqueeze(0) + torch.cross(w, rel, dim=-1)
+        pqd_w = wp.from_torch(pqd.contiguous(), dtype=wp.vec3f)
+        wp.copy(pqd_dev, pqd_w)
+        if cls._state_1 is not None and getattr(cls._state_1, "particle_qd", None) is not None:
+            pqd1 = cls._state_1.particle_qd
+            if pqd1 is not None and pqd1.ptr:
+                wp.copy(pqd1, pqd_w)
+
+    @classmethod
     def clear(cls) -> None:
         """Clear manager state. Reset Simplicits-related attributes."""
         cls._simplicits_solver = None
         cls._per_env_particle_ranges = None
         cls._particle_rest_q = None
+        cls._simplicits_T_build_inv = None
+        cls._simplicits_particle_q_build = None
         super().clear()

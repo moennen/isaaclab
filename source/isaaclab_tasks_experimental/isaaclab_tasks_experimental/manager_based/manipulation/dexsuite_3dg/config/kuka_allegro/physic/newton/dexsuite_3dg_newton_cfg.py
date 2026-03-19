@@ -41,5 +41,3 @@ class Dexsuite3dgNewtonCfg(NewtonCfg):
         use_mujoco_contacts=True,
         ccd_iterations=5000,
     )
-    num_substeps: int = 2
-    debug_mode: bool = False

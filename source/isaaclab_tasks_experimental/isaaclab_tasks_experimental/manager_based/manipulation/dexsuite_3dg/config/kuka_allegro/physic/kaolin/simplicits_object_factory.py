@@ -70,7 +70,11 @@ def create_rigid_simplicits_object_from_mesh(
     shape comes only from the mesh.
 
     Args:
-        vertices: Mesh vertices [m], shape (num_vertices, 3) or (1, num_vertices, 3).
+        vertices: Mesh vertices [m] in **geom local** frame (same convention as
+            :func:`~.mesh_from_usd.get_vertices_faces_from_prim_path`), shape
+            ``(num_vertices, 3)`` or ``(1, num_vertices, 3)``. When the Kaolin scene
+            uses a non-identity ``init_transform``, world pose comes from that matrix,
+            not from pre-transforming vertices.
         faces: Triangle indices, shape (num_faces, 3), long dtype.
         cfg: Simplicits object config (density, youngs_modulus, poisson_ratio, num_samples).
         device: Target device (e.g. 'cuda:0'). Inferred from vertices if None.
