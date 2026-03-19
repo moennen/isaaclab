@@ -8,3 +8,4 @@
 - [ ] Replace SimplicitObjectCfg and create_rigid_simplicits_object_from_mesh by loading simplicits object from USD
 - [ ] **Simplicits memory:** In `dexsuite_3dg_newton_manager`, drop `_particle_rest_q`; store `T_reset` (4×4 or pose) per env on reset and recompute Kabsch rest on demand as `transform_points_mat4(p_build_slice, T_reset[e] @ T_build_inv[e])` (uses `_simplicits_particle_q_build`).
 - [ ] Restore default initialization state and randomization. Beware of the cube scaling
+- [ ] Rework reset logic : check if upon reset we should regenerate the simplicits object fully instead of just copying data. This currently work because we disabled the scale and position randomization.
