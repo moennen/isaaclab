@@ -483,6 +483,37 @@ class Dexsuite3dgNewtonManager(NewtonManager):
             wp.copy(cls._state_1.particle_q, pq_w)
         cls._particle_rest_q = pq.clone()
 
+        # Update sim_z and sim_z_dot so the Simplicits solver starts from the reset
+        # transform, not from wherever sim_z was at the end of the previous episode.
+        # Without this, the first post-reset step overwrites particle_q with positions
+        # derived from the stale sim_z, undoing the teleport above.
+        #
+        # Encoding: sim_z[e*12:(e+1)*12] = [[R-I | t]] flattened (row-major, 3×4).
+        # One rigid handle (12 DOFs) per env, objects added in env order 0,1,...
+        if cls._state_0.sim_z is not None:
+            I_pad = torch.zeros(3, 4, device=device, dtype=torch.float32)
+            I_pad[:3, :3] = torch.eye(3, device=device, dtype=torch.float32)
+            # z_new[k] = [[R_k - I | t_k]] flattened → shape (n, 12)
+            z_new = (T_reset[:, :3, :] - I_pad).reshape(n, 12)
+            sim_z_t = wp.to_torch(cls._state_0.sim_z).clone()
+            for k in range(n):
+                e = int(env_ids_t[k].item())
+                sim_z_t[e * 12 : (e + 1) * 12] = z_new[k]
+            new_sim_z = wp.from_torch(sim_z_t.contiguous())
+            wp.copy(cls._state_0.sim_z, new_sim_z)
+            if cls._state_1 is not None and cls._state_1.sim_z is not None:
+                wp.copy(cls._state_1.sim_z, new_sim_z)
+
+        if cls._state_0.sim_z_dot is not None:
+            sim_z_dot_t = wp.to_torch(cls._state_0.sim_z_dot).clone()
+            for k in range(n):
+                e = int(env_ids_t[k].item())
+                sim_z_dot_t[e * 12 : (e + 1) * 12] = 0.0
+            new_sim_z_dot = wp.from_torch(sim_z_dot_t.contiguous())
+            wp.copy(cls._state_0.sim_z_dot, new_sim_z_dot)
+            if cls._state_1 is not None and cls._state_1.sim_z_dot is not None:
+                wp.copy(cls._state_1.sim_z_dot, new_sim_z_dot)
+
     @classmethod
     def apply_simplicits_particles_velocity_reset(
         cls,
