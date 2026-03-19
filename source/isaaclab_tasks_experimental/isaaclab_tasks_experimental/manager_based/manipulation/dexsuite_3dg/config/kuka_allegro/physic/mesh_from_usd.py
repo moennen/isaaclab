@@ -112,7 +112,7 @@ def get_geom_world_transform_4x4(
     prim = prims[0]
     xformable = UsdGeom.Xformable(prim)
     m = xformable.ComputeLocalToWorldTransform(Usd.TimeCode.Default())
-    mat = np.array(m, dtype=np.float64)
+    mat = np.array(m, dtype=np.float64).T  # GfMatrix4d is col-major; transpose to row-major
     return torch.tensor(mat, device=device, dtype=dtype)
 
 
