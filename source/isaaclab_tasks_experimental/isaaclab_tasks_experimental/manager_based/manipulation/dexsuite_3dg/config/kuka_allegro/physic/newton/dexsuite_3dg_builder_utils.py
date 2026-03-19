@@ -117,7 +117,8 @@ def build_rigid_proto_excluding_object(
         if verbose:
             body_list, art_list = get_builder_body_articulation_labels(builder)
             logger.debug(
-                "[DexSuite 3DG : Newton :] builder_utils: after add_usd root_path=%s body_count=%s articulation_count=%s",
+                "[DexSuite 3DG : Newton :] builder_utils: after add_usd root_path=%s "
+                "body_count=%s articulation_count=%s",
                 child_path,
                 len(body_list),
                 len(art_list),

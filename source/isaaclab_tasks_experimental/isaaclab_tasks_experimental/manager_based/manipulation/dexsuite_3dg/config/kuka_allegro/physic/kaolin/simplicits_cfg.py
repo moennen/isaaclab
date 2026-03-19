@@ -27,7 +27,7 @@ class SimplicitsObjectCfg:
     poisson_ratio: float = 0.45
     """Poisson ratio (dimensionless)."""
 
-    num_samples: int = 2000
+    num_samples: int = 1000
     """Number of points to sample from the mesh surface (Kaolin surface sampling)."""
 
     collision_particle_radius: float | None = None

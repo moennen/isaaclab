@@ -214,7 +214,7 @@ class SimplicitsObjectAdapter(AssetBase):
             {"count": self._num_instances, "link_names": ["object"]},
         )()
         logger.debug(
-            "[DexSuite 3DG : Newton :] SimplicitsObjectAdapter initialized: num_envs=%s, root_pos_w/root_quat_w from particle CoM",
+            "[DexSuite 3DG : Newton :] SimplicitsObjectAdapter init num_envs=%s (pose from particle CoM)",
             self._num_instances,
         )
 
@@ -258,8 +258,13 @@ class SimplicitsObjectAdapter(AssetBase):
         root_pose: torch.Tensor | wp.array,
         env_ids: Sequence[int] | torch.Tensor | wp.array | None = None,
     ) -> None:
-        """No-op: object pose is driven by Simplicits; reset events read default_root_pose but do not write back."""
-        pass
+        """Teleport Simplicits particles to match MDP-sampled root pose (reset events)."""
+        root_t = wp.to_torch(root_pose).float() if not isinstance(root_pose, torch.Tensor) else root_pose.float()
+        if env_ids is None:
+            eid = torch.arange(self._num_instances, device=root_t.device, dtype=torch.long)
+        else:
+            eid = torch.as_tensor(env_ids, dtype=torch.long, device=root_t.device).reshape(-1)
+        Dexsuite3dgNewtonManager.apply_simplicits_particles_pose_reset(eid, root_t)
 
     def write_root_velocity_to_sim_index(
         self,
@@ -267,8 +272,15 @@ class SimplicitsObjectAdapter(AssetBase):
         root_velocity: torch.Tensor | wp.array,
         env_ids: Sequence[int] | torch.Tensor | wp.array | None = None,
     ) -> None:
-        """No-op: object velocity is driven by Simplicits; reset events read default_root_vel but do not write back."""
-        pass
+        """Set particle velocities from rigid root twist after pose reset."""
+        vel_t = (
+            wp.to_torch(root_velocity).float() if not isinstance(root_velocity, torch.Tensor) else root_velocity.float()
+        )
+        if env_ids is None:
+            eid = torch.arange(self._num_instances, device=vel_t.device, dtype=torch.long)
+        else:
+            eid = torch.as_tensor(env_ids, dtype=torch.long, device=vel_t.device).reshape(-1)
+        Dexsuite3dgNewtonManager.apply_simplicits_particles_velocity_reset(eid, vel_t)
 
 
 _set_adapter_class()

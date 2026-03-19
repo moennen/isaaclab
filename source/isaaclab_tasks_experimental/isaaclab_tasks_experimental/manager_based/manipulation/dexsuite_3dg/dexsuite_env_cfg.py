@@ -18,7 +18,13 @@ from isaaclab.managers import SceneEntityCfg
 from isaaclab.managers import TerminationTermCfg as DoneTerm
 from isaaclab.markers import VisualizationMarkersCfg
 from isaaclab.scene import InteractiveSceneCfg
-from isaaclab.sim import CapsuleCfg, ConeCfg, CuboidCfg, RigidBodyMaterialCfg, SphereCfg
+from isaaclab.sim import (
+    CapsuleCfg,
+    ConeCfg,
+    CuboidCfg,
+    RigidBodyMaterialCfg,
+    SphereCfg,
+)
 from isaaclab.utils import configclass
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 from isaaclab.utils.noise import UniformNoiseCfg as Unoise
@@ -67,7 +73,8 @@ class ObjectCfg(PresetCfg):
         mass_props=sim_utils.MassPropertiesCfg(mass=0.2),
     )
     cube = sim_utils.CuboidCfg(
-        size=(0.05, 0.1, 0.1),
+        # TODO : reset to initial value (0.05,0.1,0.1)
+        size=(0.1, 0.1, 0.1),
         physics_material=RigidBodyMaterialCfg(static_friction=0.5),
         rigid_props=sim_utils.RigidBodyPropertiesCfg(
             solver_position_iteration_count=16,
