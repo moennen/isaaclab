@@ -65,7 +65,6 @@ def build_multi_env_simplicits_model(
     solver_type: str | None = None,
     num_qp: int | None = None,
     collision_particle_radius: float | None = None,
-    detection_ratio: float = 1.5,
     gravity: float = 9.81,
     verbose: bool = False,
 ) -> tuple[Any, list[tuple[int, int]]]:
@@ -89,7 +88,6 @@ def build_multi_env_simplicits_model(
         solver_type: Solver type for rigid proto (e.g. mujoco_warp); None to skip solver-specific registration.
         num_qp: Quadrature points per object; defaults to simplicits_cfg.num_samples.
         collision_particle_radius: Radius [m]; if None, uses cfg or computed from first env mesh and num_samples.
-        detection_ratio: Passed to add_simplicits_collisions.
         gravity: Gravity magnitude [m/s²] (positive).
         verbose: If True, log assembly steps.
 
@@ -120,7 +118,7 @@ def build_multi_env_simplicits_model(
 
     # Build Simplicits scene (all objects) first so we have sim_pts; then build Newton with
     # one world per env: rigid proto + that env's particle slice, so particles get correct world ID.
-    smb = _MultiWorldSimplicitsModelBuilder(up_axis=axis, gravity=-float(gravity))
+    smb = _MultiWorldSimplicitsModelBuilder(up_axis=axis, gravity=-float(gravity), simplicits_cfg=simplicits_cfg)
 
     # Phase 1: add all Simplicits objects to the scene (no Newton worlds yet)
     for i, env_path in enumerate(env_paths):
@@ -142,7 +140,7 @@ def build_multi_env_simplicits_model(
 
     smb.add_simplicits_collisions(
         collision_particle_radius=collision_radius,
-        detection_ratio=detection_ratio,
+        detection_ratio=simplicits_cfg.contact_detection_ratio,
     )
 
     # Phase 2: build Newton worlds with rigid proto + particle slice per env (uses scene sim_pts)
@@ -159,6 +157,7 @@ def build_multi_env_simplicits_model(
     smb.add_ground_plane()
 
     model, per_env_particle_ranges = smb.finalize_multi_world(device=device, requires_grad=False, n_envs=n_envs)
+    model.soft_contact_ke = simplicits_cfg.soft_contact_ke
     if verbose:
         logger.info(
             "assembly: multi-env finalize done; %s envs, ranges=%s",
@@ -171,10 +170,11 @@ def build_multi_env_simplicits_model(
 class _MultiWorldSimplicitsModelBuilder:
     """Builds multi-env Simplicits model: scene first, then Newton worlds with rigid proto + particle slice per env."""
 
-    def __init__(self, up_axis: Any, gravity: float):
+    def __init__(self, up_axis: Any, gravity: float, simplicits_cfg: Any):
         if SimplicitsModelBuilder is None:
             raise ImportError("Kaolin SimplicitsModelBuilder required")
         self._base = SimplicitsModelBuilder(up_axis=up_axis, gravity=gravity)
+        self._simplicits_cfg = simplicits_cfg
 
     def add_simplicits_object_only(
         self,
@@ -217,6 +217,14 @@ class _MultiWorldSimplicitsModelBuilder:
         acc_gravity = torch.zeros(3)
         acc_gravity[self._base.up_axis.value] = -self._base.gravity
         scene.set_scene_gravity(acc_gravity)
+        # The Newton convergence check tests |dx^T G_returned| < conv_tol where
+        # G_returned = BMB @ delta_dz + dt^2 * G_potential (gradient scaled by dt^2).
+        # With dt ~ 0.008 s, |dx^T G_returned| ~ dt^4 * g^2 * m^2 / M ~ 1e-7 for a
+        # typical 250 g object under gravity, which is below the default conv_tol=1e-4.
+        # Newton exits at iteration 0 without moving — gravity appears to do nothing.
+        # Setting conv_tol << dt^4 * g^2 * m / M ensures at least one Newton step is
+        # taken, restoring gravity-driven motion.
+        scene.conv_tol = self._simplicits_cfg.newton_conv_tol
         for obj_idx, name, fcn, bdry_penalty, pinned_x in self._base._pending_boundary_conditions:
             scene.set_object_boundary_condition(obj_idx, name, fcn, bdry_penalty, pinned_x)
         if self._base._pending_collisions is not None:
@@ -302,7 +310,7 @@ class _MultiWorldSimplicitsModelBuilder:
                     dt=scene.timestep,
                     friction_use_lagged_body_contact_force_norm=False,
                 ),
-                "coeff": 0.001,
+                "coeff": self._simplicits_cfg.soft_contact_coeff,
             }
 
         # Per-env ranges: we added one slice per env in build_worlds_with_particles in order
