@@ -113,11 +113,12 @@ def create_rigid_simplicits_object_from_mesh(
     points, _ = _kaolin_sample_points(vertices, faces, num_samples)
     pts = points.squeeze(0)
 
-    # Approximate volume from axis-aligned bbox of sampled points
+    # Approximate volume from axis-aligned bbox of the mesh vertices (more stable
+    # than using sampled pts, whose extent may slightly underestimate the true volume).
     mn = pts.min(dim=0).values
     mx = pts.max(dim=0).values
     bbox_vol = (mx - mn).clamp(min=1e-9).prod().item()
-    appx_vol = max(bbox_vol * 0.5, 1e-6)
+    appx_vol = max(bbox_vol, 1e-6)
 
     # Material tensors (per-point, from config)
     n = pts.shape[0]
@@ -130,7 +131,7 @@ def create_rigid_simplicits_object_from_mesh(
 
     if verbose:
         logger.info(
-            "[DexSuite 3DG : Kaolin :] simplicits_from_mesh: verts=%s faces=%s samples=%s approx_vol=%.6f",
+            "[DexSuite 3DG : Kaolin :] simplicits_from_mesh: verts=%s faces=%s samples=%s appx_vol=%.6f",
             vertices.shape[1],
             faces.shape[0],
             n,
