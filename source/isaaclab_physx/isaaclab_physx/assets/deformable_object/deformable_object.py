@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import logging
-import warnings
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
@@ -18,8 +17,7 @@ import omni.physics.tensors.impl.api as physx
 from pxr import UsdShade
 
 import isaaclab.sim as sim_utils
-import isaaclab.utils.math as math_utils
-from isaaclab.assets.asset_base import AssetBase
+from isaaclab.assets.deformable_object.base_deformable_object import BaseDeformableObject
 from isaaclab.markers import VisualizationMarkers
 
 from isaaclab_physx.physics import PhysxManager as SimulationManager
@@ -34,14 +32,14 @@ from .kernels import (
 )
 
 if TYPE_CHECKING:
-    from .deformable_object_cfg import DeformableObjectCfg
+    from isaaclab.assets.deformable_object.deformable_object_cfg import DeformableObjectCfg
 
 # import logger
 logger = logging.getLogger(__name__)
 
 
-class DeformableObject(AssetBase):
-    """A deformable object asset class.
+class DeformableObject(BaseDeformableObject):
+    """A deformable object asset class (PhysX backend).
 
     Deformable objects are assets that can be deformed in the simulation. They are typically used for
     soft bodies, such as stuffed animals and food items.
@@ -175,51 +173,6 @@ class DeformableObject(AssetBase):
     Operations - Write to simulation.
     """
 
-    def write_nodal_state_to_sim_index(
-        self,
-        nodal_state: torch.Tensor | wp.array,
-        env_ids: Sequence[int] | torch.Tensor | wp.array | None = None,
-        full_data: bool = False,
-    ) -> None:
-        """Set the nodal state over selected environment indices into the simulation.
-
-        The nodal state comprises of the nodal positions and velocities. Since these are nodes, the velocity only has
-        a translational component. All the quantities are in the simulation frame.
-
-        Args:
-            nodal_state: Nodal state in simulation frame.
-                Shape is (len(env_ids), max_sim_vertices_per_body, 6) or (num_instances, max_sim_vertices_per_body, 6).
-            env_ids: Environment indices. If None, then all indices are used.
-            full_data: Whether to expect full data. Defaults to False.
-        """
-        # Convert warp to torch if needed
-        if isinstance(nodal_state, wp.array):
-            nodal_state = wp.to_torch(nodal_state)
-        # set into simulation
-        self.write_nodal_pos_to_sim_index(nodal_state[..., :3], env_ids=env_ids, full_data=full_data)
-        self.write_nodal_velocity_to_sim_index(nodal_state[..., 3:], env_ids=env_ids, full_data=full_data)
-
-    def write_nodal_state_to_sim_mask(
-        self,
-        nodal_state: torch.Tensor | wp.array,
-        env_mask: wp.array | None = None,
-    ) -> None:
-        """Set the nodal state over selected environment mask into the simulation.
-
-        The nodal state comprises of the nodal positions and velocities. Since these are nodes, the velocity only has
-        a translational component. All the quantities are in the simulation frame.
-
-        Args:
-            nodal_state: Nodal state in simulation frame.
-                Shape is (num_instances, max_sim_vertices_per_body, 6).
-            env_mask: Environment mask. If None, then all indices are used.
-        """
-        if env_mask is not None:
-            env_ids = wp.nonzero(env_mask)
-        else:
-            env_ids = self._ALL_INDICES
-        self.write_nodal_state_to_sim_index(nodal_state, env_ids=env_ids, full_data=True)
-
     def write_nodal_pos_to_sim_index(
         self,
         nodal_pos: torch.Tensor | wp.array,
@@ -232,7 +185,7 @@ class DeformableObject(AssetBase):
         The positions are in the simulation frame.
 
         Args:
-            nodal_pos: Nodal positions in simulation frame.
+            nodal_pos: Nodal positions in simulation frame [m].
                 Shape is (len(env_ids), max_sim_vertices_per_body, 3) or (num_instances, max_sim_vertices_per_body, 3).
             env_ids: Environment indices. If None, then all indices are used.
             full_data: Whether to expect full data. Defaults to False.
@@ -266,27 +219,6 @@ class DeformableObject(AssetBase):
         # set into simulation
         self.root_view.set_sim_nodal_positions(self._data._nodal_pos_w.data.view(wp.float32), indices=env_ids)
 
-    def write_nodal_pos_to_sim_mask(
-        self,
-        nodal_pos: torch.Tensor | wp.array,
-        env_mask: wp.array | None = None,
-    ) -> None:
-        """Set the nodal positions over selected environment mask into the simulation.
-
-        The nodal position comprises of individual nodal positions of the simulation mesh for the deformable body.
-        The positions are in the simulation frame.
-
-        Args:
-            nodal_pos: Nodal positions in simulation frame.
-                Shape is (num_instances, max_sim_vertices_per_body, 3).
-            env_mask: Environment mask. If None, then all indices are used.
-        """
-        if env_mask is not None:
-            env_ids = wp.nonzero(env_mask)
-        else:
-            env_ids = self._ALL_INDICES
-        self.write_nodal_pos_to_sim_index(nodal_pos, env_ids=env_ids, full_data=True)
-
     def write_nodal_velocity_to_sim_index(
         self,
         nodal_vel: torch.Tensor | wp.array,
@@ -300,7 +232,7 @@ class DeformableObject(AssetBase):
         simulation frame.
 
         Args:
-            nodal_vel: Nodal velocities in simulation frame.
+            nodal_vel: Nodal velocities in simulation frame [m/s].
                 Shape is (len(env_ids), max_sim_vertices_per_body, 3) or (num_instances, max_sim_vertices_per_body, 3).
             env_ids: Environment indices. If None, then all indices are used.
             full_data: Whether to expect full data. Defaults to False.
@@ -334,28 +266,6 @@ class DeformableObject(AssetBase):
         # set into simulation
         self.root_view.set_sim_nodal_velocities(self._data._nodal_vel_w.data.view(wp.float32), indices=env_ids)
 
-    def write_nodal_velocity_to_sim_mask(
-        self,
-        nodal_vel: torch.Tensor | wp.array,
-        env_mask: wp.array | None = None,
-    ) -> None:
-        """Set the nodal velocity over selected environment mask into the simulation.
-
-        The nodal velocity comprises of individual nodal velocities of the simulation mesh for the deformable
-        body. Since these are nodes, the velocity only has a translational component. The velocities are in the
-        simulation frame.
-
-        Args:
-            nodal_vel: Nodal velocities in simulation frame.
-                Shape is (num_instances, max_sim_vertices_per_body, 3).
-            env_mask: Environment mask. If None, then all indices are used.
-        """
-        if env_mask is not None:
-            env_ids = wp.nonzero(env_mask)
-        else:
-            env_ids = self._ALL_INDICES
-        self.write_nodal_velocity_to_sim_index(nodal_vel, env_ids=env_ids, full_data=True)
-
     def write_nodal_kinematic_target_to_sim_index(
         self,
         targets: torch.Tensor | wp.array,
@@ -372,7 +282,7 @@ class DeformableObject(AssetBase):
             The flag is set to 0.0 for kinematically driven nodes and 1.0 for free nodes.
 
         Args:
-            targets: The kinematic targets comprising of nodal positions and flags.
+            targets: The kinematic targets comprising of nodal positions and flags [m].
                 Shape is (len(env_ids), max_sim_vertices_per_body, 4) or (num_instances, max_sim_vertices_per_body, 4).
             env_ids: Environment indices. If None, then all indices are used.
             full_data: Whether to expect full data. Defaults to False.
@@ -402,118 +312,6 @@ class DeformableObject(AssetBase):
         )
         # set into simulation
         self.root_view.set_sim_kinematic_targets(self._data.nodal_kinematic_target.view(wp.float32), indices=env_ids)
-
-    def write_nodal_kinematic_target_to_sim_mask(
-        self,
-        targets: torch.Tensor | wp.array,
-        env_mask: wp.array | None = None,
-    ) -> None:
-        """Set the kinematic targets of the simulation mesh for the deformable bodies using mask.
-
-        The kinematic targets comprise of individual nodal positions of the simulation mesh for the deformable body
-        and a flag indicating whether the node is kinematically driven or not. The positions are in the simulation
-        frame.
-
-        .. note::
-            The flag is set to 0.0 for kinematically driven nodes and 1.0 for free nodes.
-
-        Args:
-            targets: The kinematic targets comprising of nodal positions and flags.
-                Shape is (num_instances, max_sim_vertices_per_body, 4).
-            env_mask: Environment mask. If None, then all indices are used.
-        """
-        if env_mask is not None:
-            env_ids = wp.nonzero(env_mask)
-        else:
-            env_ids = self._ALL_INDICES
-        self.write_nodal_kinematic_target_to_sim_index(targets, env_ids=env_ids, full_data=True)
-
-    """
-    Operations - Deprecated wrappers.
-    """
-
-    def write_nodal_state_to_sim(
-        self,
-        nodal_state: torch.Tensor | wp.array,
-        env_ids: Sequence[int] | torch.Tensor | wp.array | None = None,
-    ) -> None:
-        """Deprecated. Please use :meth:`write_nodal_state_to_sim_index` instead."""
-        warnings.warn(
-            "The method 'write_nodal_state_to_sim' is deprecated. Please use 'write_nodal_state_to_sim_index' instead.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        self.write_nodal_state_to_sim_index(nodal_state, env_ids=env_ids)
-
-    def write_nodal_kinematic_target_to_sim(
-        self,
-        targets: torch.Tensor | wp.array,
-        env_ids: Sequence[int] | torch.Tensor | wp.array | None = None,
-    ) -> None:
-        """Deprecated. Please use :meth:`write_nodal_kinematic_target_to_sim_index` instead."""
-        warnings.warn(
-            "The method 'write_nodal_kinematic_target_to_sim' is deprecated."
-            " Please use 'write_nodal_kinematic_target_to_sim_index' instead.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        self.write_nodal_kinematic_target_to_sim_index(targets, env_ids=env_ids)
-
-    def write_nodal_pos_to_sim(
-        self,
-        nodal_pos: torch.Tensor | wp.array,
-        env_ids: Sequence[int] | torch.Tensor | wp.array | None = None,
-    ) -> None:
-        """Deprecated. Please use :meth:`write_nodal_pos_to_sim_index` instead."""
-        warnings.warn(
-            "The method 'write_nodal_pos_to_sim' is deprecated. Please use 'write_nodal_pos_to_sim_index' instead.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        self.write_nodal_pos_to_sim_index(nodal_pos, env_ids=env_ids)
-
-    def write_nodal_velocity_to_sim(
-        self,
-        nodal_vel: torch.Tensor | wp.array,
-        env_ids: Sequence[int] | torch.Tensor | wp.array | None = None,
-    ) -> None:
-        """Deprecated. Please use :meth:`write_nodal_velocity_to_sim_index` instead."""
-        warnings.warn(
-            "The method 'write_nodal_velocity_to_sim' is deprecated."
-            " Please use 'write_nodal_velocity_to_sim_index' instead.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        self.write_nodal_velocity_to_sim_index(nodal_vel, env_ids=env_ids)
-
-    """
-    Operations - Helper.
-    """
-
-    def transform_nodal_pos(
-        self, nodal_pos: torch.tensor, pos: torch.Tensor | None = None, quat: torch.Tensor | None = None
-    ) -> torch.Tensor:
-        """Transform the nodal positions based on the pose transformation.
-
-        This function computes the transformation of the nodal positions based on the pose transformation.
-        It multiplies the nodal positions with the rotation matrix of the pose and adds the translation.
-        Internally, it calls the :meth:`isaaclab.utils.math.transform_points` function.
-
-        Args:
-            nodal_pos: The nodal positions in the simulation frame. Shape is (N, max_sim_vertices_per_body, 3).
-            pos: The position transformation. Shape is (N, 3).
-                Defaults to None, in which case the position is assumed to be zero.
-            quat: The orientation transformation as quaternion (x, y, z, w). Shape is (N, 4).
-                Defaults to None, in which case the orientation is assumed to be identity.
-
-        Returns:
-            The transformed nodal positions. Shape is (N, max_sim_vertices_per_body, 3).
-        """
-        # offset the nodal positions to center them around the origin
-        mean_nodal_pos = nodal_pos.mean(dim=1, keepdim=True)
-        nodal_pos = nodal_pos - mean_nodal_pos
-        # transform the nodal positions based on the pose around the origin
-        return math_utils.transform_points(nodal_pos, pos, quat) + mean_nodal_pos
 
     """
     Internal helper.

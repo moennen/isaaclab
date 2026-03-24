@@ -1,0 +1,685 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
+from __future__ import annotations
+
+import logging
+from collections.abc import Sequence
+from typing import TYPE_CHECKING
+
+import numpy as np
+import torch
+import warp as wp
+
+from pxr import UsdGeom
+
+import isaaclab.sim as sim_utils
+from isaaclab.assets.deformable_object.base_deformable_object import BaseDeformableObject
+from isaaclab.physics import PhysicsEvent
+
+from isaaclab_newton.physics import NewtonManager as SimulationManager
+
+from .deformable_object_data import DeformableObjectData
+from .kernels import (
+    compute_nodal_state_w,
+    scatter_default_pos_index,
+    scatter_particles_vec3f_index,
+    scatter_zero_vel_index,
+    set_kinematic_flags_to_one,
+    vec6f,
+)
+
+if TYPE_CHECKING:
+    from isaaclab.assets.deformable_object.deformable_object_cfg import DeformableObjectCfg
+
+logger = logging.getLogger(__name__)
+
+
+class DeformableObject(BaseDeformableObject):
+    """A deformable object asset class (Newton backend).
+
+    This class manages cloth/deformable bodies in the Newton physics engine. Newton stores all
+    particles in flat arrays (``state.particle_q``, ``state.particle_qd``). This class builds
+    a per-instance indexing layer on top of those flat arrays, enabling the standard
+    :class:`BaseDeformableObject` interface for reading/writing nodal state.
+
+    The cloth mesh is added to the Newton :class:`ModelBuilder` during the ``MODEL_INIT`` phase.
+    The mesh data is read from the USD prim at :attr:`cfg.prim_path`, and cloth simulation
+    parameters (density, stiffness, etc.) come from :attr:`DeformableObjectCfg`.
+    """
+
+    cfg: DeformableObjectCfg
+    """Configuration instance for the deformable object."""
+
+    __backend_name__: str = "newton"
+    """The name of the backend for the deformable object."""
+
+    def __init__(self, cfg: DeformableObjectCfg):
+        """Initialize the deformable object.
+
+        Args:
+            cfg: A configuration instance.
+        """
+        # Track particle offsets recorded during MODEL_INIT (before super().__init__ triggers callbacks)
+        self._recorded_particle_offsets: list[int] = []
+        self._recorded_particles_per_body: int = 0
+
+        # Register MODEL_INIT callback to add cloth mesh to the Newton builder.
+        # This must happen before finalize() is called.
+        self._model_init_handle = SimulationManager.register_callback(
+            lambda payload: self._add_cloth_to_builder(payload),
+            PhysicsEvent.MODEL_INIT,
+            order=5,  # Run before default (10) to ensure cloth is added before finalize
+        )
+
+        super().__init__(cfg)
+        # Register custom vec6f type for nodal state validation.
+        self._DTYPE_TO_TORCH_TRAILING_DIMS = {**self._DTYPE_TO_TORCH_TRAILING_DIMS, vec6f: (6,)}
+
+    """
+    Properties
+    """
+
+    @property
+    def data(self) -> DeformableObjectData:
+        return self._data
+
+    @property
+    def num_instances(self) -> int:
+        return self._num_instances
+
+    @property
+    def num_bodies(self) -> int:
+        """Number of bodies in the asset.
+
+        This is always 1 since each object is a single deformable body.
+        """
+        return 1
+
+    @property
+    def max_sim_vertices_per_body(self) -> int:
+        """The maximum number of simulation mesh vertices per deformable body."""
+        return self._particles_per_body
+
+    """
+    Operations.
+    """
+
+    def reset(self, env_ids: Sequence[int] | None = None, env_mask: wp.array | None = None) -> None:
+        """Reset the deformable object.
+
+        For selected environments, restores default particle positions and zeros velocities
+        in both Newton states. Also zeros VBD solver internal buffers for the affected particles.
+
+        Args:
+            env_ids: Environment indices. If None, then all indices are used.
+            env_mask: Environment mask. If None, then all the instances are updated.
+                Shape is (num_instances,).
+        """
+        # Resolve env_ids
+        if env_mask is not None:
+            env_ids_wp = wp.nonzero(env_mask)
+        elif env_ids is None:
+            env_ids_wp = self._ALL_INDICES
+        else:
+            env_ids_wp = self._resolve_env_ids(env_ids)
+
+        num_selected = env_ids_wp.shape[0]
+        if num_selected == 0:
+            return
+
+        # Reset particle positions and velocities in both states
+        for state in (SimulationManager._state_0, SimulationManager._state_1):
+            if state is None:
+                continue
+            if state.particle_q is not None:
+                wp.launch(
+                    scatter_default_pos_index,
+                    dim=(num_selected, self._particles_per_body),
+                    inputs=[self._default_nodal_pos_w, env_ids_wp, self._particle_offsets],
+                    outputs=[state.particle_q],
+                    device=self.device,
+                )
+            if state.particle_qd is not None:
+                wp.launch(
+                    scatter_zero_vel_index,
+                    dim=(num_selected, self._particles_per_body),
+                    inputs=[env_ids_wp, self._particle_offsets, self._particles_per_body],
+                    outputs=[state.particle_qd],
+                    device=self.device,
+                )
+
+        # Zero VBD solver internal buffers for affected particle ranges
+        solver = SimulationManager._solver
+        if solver is not None:
+            for attr in ("particle_q_prev", "inertia", "pos_prev_collision_detection", "particle_displacements"):
+                buf = getattr(solver, attr, None)
+                if buf is not None and buf.dtype == wp.vec3f:
+                    wp.launch(
+                        scatter_zero_vel_index,
+                        dim=(num_selected, self._particles_per_body),
+                        inputs=[env_ids_wp, self._particle_offsets, self._particles_per_body],
+                        outputs=[buf],
+                        device=self.device,
+                    )
+
+    def write_data_to_sim(self):
+        pass
+
+    def update(self, dt: float):
+        self._data.update(dt)
+        # Update USD visualization if enabled
+        self._update_cloth_vis()
+
+    """
+    Operations - Write to simulation.
+    """
+
+    def write_nodal_pos_to_sim_index(
+        self,
+        nodal_pos: torch.Tensor | wp.array,
+        env_ids: Sequence[int] | torch.Tensor | wp.array | None = None,
+        full_data: bool = False,
+    ) -> None:
+        """Set the nodal positions over selected environment indices into the simulation.
+
+        Args:
+            nodal_pos: Nodal positions in simulation frame [m].
+                Shape is (len(env_ids), max_sim_vertices_per_body, 3)
+                or (num_instances, max_sim_vertices_per_body, 3).
+            env_ids: Environment indices. If None, then all indices are used.
+            full_data: Whether to expect full data. Defaults to False.
+        """
+        env_ids = self._resolve_env_ids(env_ids)
+        if full_data:
+            self.assert_shape_and_dtype(
+                nodal_pos, (self.num_instances, self._particles_per_body), wp.vec3f, "nodal_pos"
+            )
+        else:
+            self.assert_shape_and_dtype(nodal_pos, (env_ids.shape[0], self._particles_per_body), wp.vec3f, "nodal_pos")
+        if isinstance(nodal_pos, torch.Tensor):
+            nodal_pos = wp.from_torch(nodal_pos.contiguous(), dtype=wp.vec3f)
+
+        # Scatter into both Newton states
+        for state in (SimulationManager._state_0, SimulationManager._state_1):
+            if state is not None and state.particle_q is not None:
+                wp.launch(
+                    scatter_particles_vec3f_index,
+                    dim=(env_ids.shape[0], self._particles_per_body),
+                    inputs=[nodal_pos, env_ids, self._particle_offsets, full_data],
+                    outputs=[state.particle_q],
+                    device=self.device,
+                )
+
+        # Invalidate data caches
+        self._data._nodal_pos_w.timestamp = -1.0
+        self._data._nodal_state_w.timestamp = -1.0
+        self._data._root_pos_w.timestamp = -1.0
+
+    def write_nodal_velocity_to_sim_index(
+        self,
+        nodal_vel: torch.Tensor | wp.array,
+        env_ids: Sequence[int] | torch.Tensor | wp.array | None = None,
+        full_data: bool = False,
+    ) -> None:
+        """Set the nodal velocity over selected environment indices into the simulation.
+
+        Args:
+            nodal_vel: Nodal velocities in simulation frame [m/s].
+                Shape is (len(env_ids), max_sim_vertices_per_body, 3)
+                or (num_instances, max_sim_vertices_per_body, 3).
+            env_ids: Environment indices. If None, then all indices are used.
+            full_data: Whether to expect full data. Defaults to False.
+        """
+        env_ids = self._resolve_env_ids(env_ids)
+        if full_data:
+            self.assert_shape_and_dtype(
+                nodal_vel, (self.num_instances, self._particles_per_body), wp.vec3f, "nodal_vel"
+            )
+        else:
+            self.assert_shape_and_dtype(nodal_vel, (env_ids.shape[0], self._particles_per_body), wp.vec3f, "nodal_vel")
+        if isinstance(nodal_vel, torch.Tensor):
+            nodal_vel = wp.from_torch(nodal_vel.contiguous(), dtype=wp.vec3f)
+
+        # Scatter into both Newton states
+        for state in (SimulationManager._state_0, SimulationManager._state_1):
+            if state is not None and state.particle_qd is not None:
+                wp.launch(
+                    scatter_particles_vec3f_index,
+                    dim=(env_ids.shape[0], self._particles_per_body),
+                    inputs=[nodal_vel, env_ids, self._particle_offsets, full_data],
+                    outputs=[state.particle_qd],
+                    device=self.device,
+                )
+
+        # Invalidate data caches
+        self._data._nodal_vel_w.timestamp = -1.0
+        self._data._nodal_state_w.timestamp = -1.0
+        self._data._root_vel_w.timestamp = -1.0
+
+    def write_nodal_kinematic_target_to_sim_index(
+        self,
+        targets: torch.Tensor | wp.array,
+        env_ids: Sequence[int] | torch.Tensor | wp.array | None = None,
+        full_data: bool = False,
+    ) -> None:
+        """Set the kinematic targets of the simulation mesh for the deformable bodies.
+
+        Newton has no native kinematic target API. Instead:
+        - Kinematic (flag=0.0): set ``particle_inv_mass`` to 0, write target pos, zero vel
+        - Free (flag=1.0): restore original ``particle_inv_mass``
+
+        Args:
+            targets: The kinematic targets comprising of nodal positions and flags [m].
+                Shape is (len(env_ids), max_sim_vertices_per_body, 4)
+                or (num_instances, max_sim_vertices_per_body, 4).
+            env_ids: Environment indices. If None, then all indices are used.
+            full_data: Whether to expect full data. Defaults to False.
+        """
+        env_ids = self._resolve_env_ids(env_ids)
+        if full_data:
+            self.assert_shape_and_dtype(targets, (self.num_instances, self._particles_per_body), wp.vec4f, "targets")
+        else:
+            self.assert_shape_and_dtype(targets, (env_ids.shape[0], self._particles_per_body), wp.vec4f, "targets")
+        if isinstance(targets, torch.Tensor):
+            if targets.dim() == 2:
+                targets = targets.unsqueeze(0)
+            targets = wp.from_torch(targets.contiguous(), dtype=wp.vec4f)
+
+        # Store kinematic targets in our data buffer
+        # Note: actual enforcement via particle_inv_mass is deferred to write_data_to_sim
+        # For now, we just store the targets for data access
+        if self._data.nodal_kinematic_target is not None:
+            # Write targets into our buffer (simple copy for selected envs)
+            targets_torch = wp.to_torch(targets)
+            buffer_torch = wp.to_torch(self._data.nodal_kinematic_target)
+            if full_data:
+                for idx in range(env_ids.shape[0]):
+                    env_id = int(wp.to_torch(env_ids)[idx].item())
+                    buffer_torch[env_id] = targets_torch[env_id]
+            else:
+                for idx in range(env_ids.shape[0]):
+                    env_id = int(wp.to_torch(env_ids)[idx].item())
+                    buffer_torch[env_id] = targets_torch[idx]
+
+    """
+    Internal helper.
+    """
+
+    def _resolve_env_ids(self, env_ids):
+        """Resolve environment indices to a warp int32 array."""
+        if env_ids is None or (isinstance(env_ids, slice) and env_ids == slice(None)):
+            return self._ALL_INDICES
+        elif isinstance(env_ids, list):
+            return wp.array(env_ids, dtype=wp.int32, device=self.device)
+        elif isinstance(env_ids, torch.Tensor):
+            return wp.from_torch(env_ids.to(torch.int32), dtype=wp.int32)
+        return env_ids
+
+    def _add_cloth_to_builder(self, payload=None) -> None:
+        """Add cloth meshes to the Newton ModelBuilder.
+
+        Called during MODEL_INIT, before ``builder.finalize()``. Reads the mesh from the USD prim
+        at :attr:`cfg.prim_path` and adds one cloth instance per environment.
+        """
+
+        import newton
+
+        builder = SimulationManager._builder
+        if builder is None:
+            return
+
+        # Determine number of environments
+        num_envs = SimulationManager._num_envs or 1
+
+        # Read the mesh from USD — either from an external file or from the stage
+        if self.cfg.mesh_usd_path is not None:
+            # Read mesh from external USD file (avoids stage composition issues)
+            from pxr import Usd
+
+            ext_stage = Usd.Stage.Open(self.cfg.mesh_usd_path)
+            prim_path = self.cfg.mesh_prim_path
+            if prim_path is None:
+                # Try default prim
+                default_prim = ext_stage.GetDefaultPrim()
+                if default_prim and default_prim.IsValid():
+                    prim_path = default_prim.GetPath().pathString
+                else:
+                    raise RuntimeError(
+                        f"No mesh_prim_path specified and '{self.cfg.mesh_usd_path}' has no default prim."
+                    )
+            ext_prim = ext_stage.GetPrimAtPath(prim_path)
+            if not ext_prim.IsValid():
+                raise RuntimeError(f"Prim '{prim_path}' not found in '{self.cfg.mesh_usd_path}'.")
+
+            try:
+                ext_mesh = newton.usd.get_mesh(ext_prim)
+                mesh_points = ext_mesh.vertices
+                mesh_indices = ext_mesh.indices
+            except Exception:
+                usd_mesh = UsdGeom.Mesh(ext_prim)
+                mesh_points = np.array(usd_mesh.GetPointsAttr().Get(), dtype=np.float32)
+                mesh_indices = list(usd_mesh.GetFaceVertexIndicesAttr().Get())
+        else:
+            # Read mesh from stage prim
+            template_prim = sim_utils.find_first_matching_prim(self.cfg.prim_path)
+            if template_prim is None:
+                raise RuntimeError(f"Failed to find prim for expression: '{self.cfg.prim_path}'.")
+
+            mesh_prim = None
+            if template_prim.IsA(UsdGeom.Mesh):
+                mesh_prim = template_prim
+            else:
+                for child in template_prim.GetAllChildren():
+                    if child.IsA(UsdGeom.Mesh):
+                        mesh_prim = child
+                        break
+
+            if mesh_prim is None:
+                try:
+                    ext_mesh = newton.usd.get_mesh(template_prim)
+                    mesh_points = ext_mesh.vertices
+                    mesh_indices = ext_mesh.indices
+                except Exception:
+                    raise RuntimeError(
+                        f"Failed to find mesh data at '{self.cfg.prim_path}'. "
+                        "Please ensure the prim has a UsdGeom.Mesh or is readable by newton.usd.get_mesh."
+                    )
+            else:
+                usd_mesh = UsdGeom.Mesh(mesh_prim)
+                mesh_points = np.array(usd_mesh.GetPointsAttr().Get(), dtype=np.float32)
+                mesh_indices = list(usd_mesh.GetFaceVertexIndicesAttr().Get())
+
+        # Scale vertices (e.g., cm to m conversion)
+        # The scale is applied to the raw mesh points
+        vertices = [wp.vec3(float(p[0]), float(p[1]), float(p[2])) for p in mesh_points]
+
+        # Get initial pose from config
+        init_pos = self.cfg.init_state.pos if hasattr(self.cfg.init_state, "pos") else (0.0, 0.0, 0.0)
+        init_rot = self.cfg.init_state.rot if hasattr(self.cfg.init_state, "rot") else (1.0, 0.0, 0.0, 0.0)
+
+        # Get environment positions for multi-env
+        env_positions = self._get_env_positions(num_envs)
+
+        # Add cloth mesh for each environment
+        for env_idx in range(num_envs):
+            before_count = getattr(builder, "particle_count", 0)
+
+            # Compute per-env position offset
+            env_pos = env_positions[env_idx] if env_positions is not None else (0.0, 0.0, 0.0)
+            cloth_pos = wp.vec3(
+                init_pos[0] + env_pos[0],
+                init_pos[1] + env_pos[1],
+                init_pos[2] + env_pos[2],
+            )
+            cloth_rot = wp.quat(init_rot[0], init_rot[1], init_rot[2], init_rot[3])
+
+            builder.add_cloth_mesh(
+                pos=cloth_pos,
+                rot=cloth_rot,
+                scale=self.cfg.mesh_scale,
+                vel=wp.vec3(0.0, 0.0, 0.0),
+                vertices=vertices,
+                indices=mesh_indices,
+                density=self.cfg.density,
+                tri_ke=self.cfg.tri_ke,
+                tri_ka=self.cfg.tri_ka,
+                tri_kd=self.cfg.tri_kd,
+                edge_ke=self.cfg.edge_ke,
+                edge_kd=self.cfg.edge_kd,
+                particle_radius=self.cfg.particle_radius,
+            )
+
+            after_count = getattr(builder, "particle_count", 0)
+            delta = after_count - before_count
+
+            self._recorded_particle_offsets.append(before_count)
+            if env_idx == 0:
+                self._recorded_particles_per_body = delta
+            elif delta != self._recorded_particles_per_body:
+                logger.warning(
+                    f"Env {env_idx} has {delta} particles vs {self._recorded_particles_per_body} for env 0. "
+                    "All environments must have the same number of particles."
+                )
+
+        # Build vertex colouring required by VBD solver
+        builder.color()
+
+        logger.info(
+            f"Newton cloth: {num_envs} instances, {self._recorded_particles_per_body} particles each, "
+            f"offsets={self._recorded_particle_offsets}"
+        )
+
+    def _get_env_positions(self, num_envs: int) -> list[tuple[float, float, float]] | None:
+        """Get world positions of each environment from the USD stage.
+
+        Returns:
+            List of (x, y, z) positions for each env, or None if only one env.
+        """
+        if num_envs <= 1:
+            return None
+
+        from pxr import UsdGeom
+
+        from isaaclab.sim.utils.stage import get_current_stage
+
+        stage = get_current_stage()
+        env_positions = []
+        xform_cache = UsdGeom.XformCache()
+
+        for env_idx in range(num_envs):
+            env_path = f"/World/envs/env_{env_idx}"
+            env_prim = stage.GetPrimAtPath(env_path)
+            if env_prim and env_prim.IsValid():
+                xform = xform_cache.GetLocalToWorldTransform(env_prim)
+                trans = xform.ExtractTranslation()
+                env_positions.append((trans[0], trans[1], trans[2]))
+            else:
+                env_positions.append((0.0, 0.0, 0.0))
+
+        return env_positions
+
+    def _initialize_impl(self):
+        """Initialize physics handles and buffers after the Newton model is ready."""
+        # Store instance count and particle info from MODEL_INIT phase
+        self._num_instances = len(self._recorded_particle_offsets)
+        self._particles_per_body = self._recorded_particles_per_body
+
+        if self._num_instances == 0:
+            raise RuntimeError(
+                f"No deformable body instances found for '{self.cfg.prim_path}'. "
+                "The MODEL_INIT callback may not have been invoked."
+            )
+
+        logger.info(f"Newton deformable object initialized at: {self.cfg.prim_path}")
+        logger.info(f"Number of instances: {self._num_instances}")
+        logger.info(f"Particles per body: {self._particles_per_body}")
+
+        # Build particle offset array on device
+        self._particle_offsets = wp.array(self._recorded_particle_offsets, dtype=wp.int32, device=self.device)
+
+        # Create data container
+        self._data = DeformableObjectData(
+            particle_offsets=self._particle_offsets,
+            particles_per_body=self._particles_per_body,
+            num_instances=self._num_instances,
+            device=self.device,
+        )
+
+        # Bind simulation state arrays
+        state = SimulationManager._state_0
+        if state is not None:
+            self._data.bind_simulation_state(state.particle_q, state.particle_qd)
+
+        # Create buffers
+        self._create_buffers()
+
+        # Update data once
+        self.update(0.0)
+
+        # Register rebind callback for full resets
+        self._physics_ready_handle = SimulationManager.register_callback(
+            lambda _: self._rebind_state(),
+            PhysicsEvent.PHYSICS_READY,
+            name=f"deformable_object_rebind_{self.cfg.prim_path}",
+        )
+
+    def _rebind_state(self) -> None:
+        """Rebind state arrays after a full simulation reset."""
+        state = SimulationManager._state_0
+        if state is not None and hasattr(self, "_data"):
+            self._data.bind_simulation_state(state.particle_q, state.particle_qd)
+
+    def _create_buffers(self):
+        """Create buffers for storing data."""
+        # Constants
+        self._ALL_INDICES = wp.array(np.arange(self._num_instances, dtype=np.int32), device=self.device)
+
+        # Snapshot default positions from current state (after finalize + FK)
+        state = SimulationManager._state_0
+        if state is not None and state.particle_q is not None:
+            # Gather initial positions per instance
+            from .kernels import gather_particles_vec3f
+
+            self._default_nodal_pos_w = wp.zeros(
+                (self._num_instances, self._particles_per_body), dtype=wp.vec3f, device=self.device
+            )
+            wp.launch(
+                gather_particles_vec3f,
+                dim=(self._num_instances, self._particles_per_body),
+                inputs=[state.particle_q, self._particle_offsets, self._particles_per_body],
+                outputs=[self._default_nodal_pos_w],
+                device=self.device,
+            )
+
+            # Compute default nodal state as vec6f (positions + zero velocities)
+            nodal_velocities = wp.zeros(
+                (self._num_instances, self._particles_per_body), dtype=wp.vec3f, device=self.device
+            )
+            self._data.default_nodal_state_w = wp.zeros(
+                (self._num_instances, self._particles_per_body), dtype=vec6f, device=self.device
+            )
+            wp.launch(
+                compute_nodal_state_w,
+                dim=(self._num_instances, self._particles_per_body),
+                inputs=[self._default_nodal_pos_w, nodal_velocities],
+                outputs=[self._data.default_nodal_state_w],
+                device=self.device,
+            )
+        else:
+            self._default_nodal_pos_w = None
+
+        # Kinematic targets — allocate and initialize with free flags
+        self._data.nodal_kinematic_target = wp.zeros(
+            (self._num_instances, self._particles_per_body), dtype=wp.vec4f, device=self.device
+        )
+        wp.launch(
+            set_kinematic_flags_to_one,
+            dim=(self._num_instances * self._particles_per_body,),
+            inputs=[self._data.nodal_kinematic_target.reshape((self._num_instances * self._particles_per_body,))],
+            device=self.device,
+        )
+
+        # Set up the model parameters
+        model = SimulationManager._model
+        if model is not None:
+            if hasattr(model, "edge_rest_angle"):
+                model.edge_rest_angle.zero_()
+            model.soft_contact_ke = self.cfg.soft_contact_ke
+            model.soft_contact_kd = self.cfg.soft_contact_kd
+
+        # Create USD visualization prim (Kit only)
+        if not SimulationManager._clone_physics_only:
+            self._create_cloth_vis_prim()
+
+    """
+    USD mesh visualization (Kit only).
+    """
+
+    def _create_cloth_vis_prim(self) -> None:
+        """Create UsdGeom.Mesh prims for Kit viewport rendering.
+
+        One prim per instance, updated every render step from Newton particle state.
+        """
+        from pxr import Gf, Sdf, Vt
+
+        from isaaclab.sim.utils.stage import get_current_stage
+
+        model = SimulationManager._model
+        if model is None:
+            return
+
+        stage = get_current_stage()
+        state = SimulationManager._state_0
+        if state is None or state.particle_q is None:
+            return
+
+        # Get triangle topology from model
+        tri_idx = model.tri_indices.numpy().reshape(-1, 3)
+        # Compute per-instance triangle indices (offset from instance's particle range)
+        self._vis_prims = []
+
+        for inst_idx in range(self._num_instances):
+            prim_path = f"/World/cloth_vis_{inst_idx}"
+            offset = self._recorded_particle_offsets[inst_idx]
+
+            # Get this instance's triangle indices relative to its particle range
+            # Filter triangles that belong to this instance
+            mask = (tri_idx >= offset) & (tri_idx < offset + self._particles_per_body)
+            mask = mask.all(axis=1)
+            inst_tris = tri_idx[mask] - offset
+
+            if len(inst_tris) == 0:
+                continue
+
+            face_vertex_indices = Vt.IntArray(inst_tris.flatten().tolist())
+            face_vertex_counts = Vt.IntArray([3] * len(inst_tris))
+
+            # Initial vertex positions
+            pts_np = state.particle_q.numpy()[offset : offset + self._particles_per_body]
+            points = Vt.Vec3fArray([Gf.Vec3f(float(p[0]), float(p[1]), float(p[2])) for p in pts_np])
+
+            mesh = UsdGeom.Mesh.Define(stage, Sdf.Path(prim_path))
+            mesh.GetPointsAttr().Set(points)
+            mesh.GetFaceVertexIndicesAttr().Set(face_vertex_indices)
+            mesh.GetFaceVertexCountsAttr().Set(face_vertex_counts)
+            mesh.GetSubdivisionSchemeAttr().Set(UsdGeom.Tokens.none)
+
+            self._vis_prims.append((mesh, offset))
+
+    def _update_cloth_vis(self) -> None:
+        """Write current Newton particle positions into Kit cloth mesh prims."""
+        if not hasattr(self, "_vis_prims") or not self._vis_prims:
+            return
+
+        state = SimulationManager._state_0
+        if state is None or state.particle_q is None:
+            return
+
+        from pxr import Gf, Vt
+
+        pts_np = state.particle_q.numpy()
+        for mesh, offset in self._vis_prims:
+            inst_pts = pts_np[offset : offset + self._particles_per_body]
+            points = Vt.Vec3fArray([Gf.Vec3f(float(p[0]), float(p[1]), float(p[2])) for p in inst_pts])
+            mesh.GetPointsAttr().Set(points)
+
+    """
+    Internal simulation callbacks.
+    """
+
+    def _clear_callbacks(self) -> None:
+        """Clears all registered callbacks."""
+        super()._clear_callbacks()
+        if hasattr(self, "_model_init_handle") and self._model_init_handle is not None:
+            self._model_init_handle.deregister()
+            self._model_init_handle = None
+        if hasattr(self, "_physics_ready_handle") and self._physics_ready_handle is not None:
+            self._physics_ready_handle.deregister()
+            self._physics_ready_handle = None
+
+    def _invalidate_initialize_callback(self, event):
+        """Invalidates the scene elements."""
+        super()._invalidate_initialize_callback(event)

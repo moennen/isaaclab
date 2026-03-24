@@ -5,10 +5,12 @@
 
 from __future__ import annotations
 
-import torch
+import logging
 from collections.abc import Sequence
 
+import torch
 import warp as wp
+
 from pxr import Gf, Usd, UsdGeom
 
 import isaaclab.sim as sim_utils
@@ -20,8 +22,6 @@ from isaaclab.sim.utils.stage import get_current_stage
 from isaaclab.utils.math import sample_uniform
 
 from .donglaix_test_env_cfg import DonglaixTestEnvCfg
-
-import logging
 
 logger = logging.getLogger(__name__)
 
@@ -46,9 +46,9 @@ class DonglaixTestEnv(DirectRLEnv):
         # ------------------------------------------------------------------
         self._ik_available = False
         try:
-            from isaaclab_newton.physics import NewtonManager
             import newton
             import newton.ik as ik
+            from isaaclab_newton.physics import NewtonManager
 
             newton_model = NewtonManager._model
             if newton_model is not None:
@@ -75,9 +75,7 @@ class DonglaixTestEnv(DirectRLEnv):
                 )
 
                 # Joint config buffer for IK: shape (1 problem, joint_coord_count)
-                self._ik_joint_q = wp.array(
-                    newton_model.joint_q, shape=(1, newton_model.joint_coord_count)
-                )
+                self._ik_joint_q = wp.array(newton_model.joint_q, shape=(1, newton_model.joint_coord_count))
 
                 self._ik_solver = ik.IKSolver(
                     model=newton_model,
@@ -112,6 +110,7 @@ class DonglaixTestEnv(DirectRLEnv):
         self._omniverse_mode = False
         try:
             import omni.usd  # noqa: F401
+
             self._omniverse_mode = True
         except ImportError:
             pass
@@ -219,9 +218,7 @@ class DonglaixTestEnv(DirectRLEnv):
             self._ik_solver.step(self._ik_joint_q, self._ik_joint_q, iterations=24)
 
             solved_arm_q = wp.to_torch(self._ik_joint_q)[0, self._arm_joint_idx]
-            self.robot.set_joint_position_target_index(
-                target=solved_arm_q.unsqueeze(0), joint_ids=self._arm_joint_idx
-            )
+            self.robot.set_joint_position_target_index(target=solved_arm_q.unsqueeze(0), joint_ids=self._arm_joint_idx)
         else:
             # IK not available: action-driven position offsets
             targets = self._default_joint_pos[:, self._arm_joint_idx] + self.actions * self.cfg.action_scale
@@ -290,22 +287,20 @@ class DonglaixTestEnv(DirectRLEnv):
             import newton
 
             ik_state = self._newton_model.state()
-            newton.eval_fk(
-                self._newton_model, self._newton_model.joint_q, self._newton_model.joint_qd, ik_state
-            )
+            newton.eval_fk(self._newton_model, self._newton_model.joint_q, self._newton_model.joint_qd, ik_state)
             body_q_np = ik_state.body_q.numpy()
             ee_pos = body_q_np[self._ee_index][:3]
             cylinder_pos = torch.tensor(
                 [[ee_pos[0], ee_pos[1], ee_pos[2] + 0.5]], dtype=torch.float32, device=self.device
             ).expand(len(env_ids), -1)
         else:
-            cylinder_pos = torch.tensor(
-                [[0.5, 0.0, 1.5]], dtype=torch.float32, device=self.device
-            ).expand(len(env_ids), -1)
+            cylinder_pos = torch.tensor([[0.5, 0.0, 1.5]], dtype=torch.float32, device=self.device).expand(
+                len(env_ids), -1
+            )
 
-        cylinder_orient = torch.tensor(
-            [[1.0, 0.0, 0.0, 0.0]], dtype=torch.float32, device=self.device
-        ).expand(len(env_ids), -1)
+        cylinder_orient = torch.tensor([[1.0, 0.0, 0.0, 0.0]], dtype=torch.float32, device=self.device).expand(
+            len(env_ids), -1
+        )
         cylinder_pose = torch.cat([cylinder_pos, cylinder_orient], dim=-1)
         cylinder_vel = torch.zeros(len(env_ids), 6, dtype=torch.float32, device=self.device)
 

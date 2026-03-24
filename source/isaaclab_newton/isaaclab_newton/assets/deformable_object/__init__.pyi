@@ -2,3 +2,11 @@
 # All rights reserved.
 #
 # SPDX-License-Identifier: BSD-3-Clause
+
+__all__ = [
+    "DeformableObject",
+    "DeformableObjectData",
+]
+
+from .deformable_object import DeformableObject
+from .deformable_object_data import DeformableObjectData

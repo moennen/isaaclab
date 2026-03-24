@@ -9,13 +9,14 @@ import warp as wp
 
 import omni.physics.tensors.impl.api as physx
 
+from isaaclab.assets.deformable_object.base_deformable_object_data import BaseDeformableObjectData
 from isaaclab.utils.buffers import TimestampedBufferWarp as TimestampedBuffer
 
 from .kernels import compute_mean_vec3f_over_vertices, compute_nodal_state_w, vec6f
 
 
-class DeformableObjectData:
-    """Data container for a deformable object.
+class DeformableObjectData(BaseDeformableObjectData):
+    """Data container for a deformable object (PhysX backend).
 
     This class contains the data for a deformable object in the simulation. The data includes the nodal states of
     the root deformable body in the object. The data is stored in the simulation world frame unless otherwise specified.
@@ -35,14 +36,13 @@ class DeformableObjectData:
     """
 
     def __init__(self, root_view: physx.SoftBodyView, device: str):
-        """Initializes the deformable object data.
+        """Initialize the deformable object data.
 
         Args:
             root_view: The root deformable body view of the object.
             device: The device used for processing.
         """
-        # Set the parameters
-        self.device = device
+        super().__init__(device)
         # Set the root deformable body view
         # note: this is stored as a weak reference to avoid circular references between the asset class
         #  and the data container. This is important to avoid memory leaks.
@@ -53,9 +53,6 @@ class DeformableObjectData:
         self._max_sim_vertices = root_view.max_sim_vertices_per_body
         self._max_sim_elements = root_view.max_sim_elements_per_body
         self._max_collision_elements = root_view.max_elements_per_body
-
-        # Set initial time stamp
-        self._sim_timestamp = 0.0
 
         # Initialize the lazy buffers.
         # -- node state in simulation world frame
@@ -85,45 +82,13 @@ class DeformableObjectData:
         self._root_pos_w = TimestampedBuffer((self._num_instances,), device, wp.vec3f)
         self._root_vel_w = TimestampedBuffer((self._num_instances,), device, wp.vec3f)
 
-    def update(self, dt: float):
-        """Updates the data for the deformable object.
-
-        Args:
-            dt: The time step for the update. This must be a positive value.
-        """
-        # update the simulation timestamp
-        self._sim_timestamp += dt
-
-    ##
-    # Defaults.
-    ##
-
-    default_nodal_state_w: wp.array = None
-    """Default nodal state ``[nodal_pos, nodal_vel]`` in simulation world frame.
-    Shape is (num_instances, max_sim_vertices_per_body) with dtype vec6f.
-    """
-
-    ##
-    # Kinematic commands
-    ##
-
-    nodal_kinematic_target: wp.array = None
-    """Simulation mesh kinematic targets for the deformable bodies.
-    Shape is (num_instances, max_sim_vertices_per_body) with dtype vec4f.
-
-    The kinematic targets are used to drive the simulation mesh vertices to the target positions.
-    The targets are stored as (x, y, z, is_not_kinematic) where "is_not_kinematic" is a binary
-    flag indicating whether the vertex is kinematic or not. The flag is set to 0 for kinematic vertices
-    and 1 for non-kinematic vertices.
-    """
-
     ##
     # Properties.
     ##
 
     @property
     def nodal_pos_w(self) -> wp.array:
-        """Nodal positions in simulation world frame. Shape is (num_instances, max_sim_vertices_per_body) vec3f."""
+        """Nodal positions in simulation world frame [m]. Shape is (num_instances, max_sim_vertices_per_body) vec3f."""
         if self._nodal_pos_w.timestamp < self._sim_timestamp:
             # get_sim_nodal_positions() returns (N, V, 3) float32 — view as (N, V) vec3f
             self._nodal_pos_w.data = (
@@ -136,7 +101,9 @@ class DeformableObjectData:
 
     @property
     def nodal_vel_w(self) -> wp.array:
-        """Nodal velocities in simulation world frame. Shape is (num_instances, max_sim_vertices_per_body) vec3f."""
+        """Nodal velocities in simulation world frame [m/s].
+        Shape is (num_instances, max_sim_vertices_per_body) vec3f.
+        """
         if self._nodal_vel_w.timestamp < self._sim_timestamp:
             self._nodal_vel_w.data = (
                 self._root_view.get_sim_nodal_velocities()
@@ -148,7 +115,7 @@ class DeformableObjectData:
 
     @property
     def nodal_state_w(self) -> wp.array:
-        """Nodal state ``[nodal_pos, nodal_vel]`` in simulation world frame.
+        """Nodal state ``[nodal_pos, nodal_vel]`` in simulation world frame [m, m/s].
         Shape is (num_instances, max_sim_vertices_per_body) vec6f.
         """
         if self._nodal_state_w.timestamp < self._sim_timestamp:
@@ -251,7 +218,7 @@ class DeformableObjectData:
     @property
     def root_pos_w(self) -> wp.array:
         """Root position from nodal positions of the simulation mesh for the deformable bodies in simulation
-        world frame. Shape is (num_instances, 3).
+        world frame [m]. Shape is (num_instances,) vec3f.
 
         This quantity is computed as the mean of the nodal positions.
         """
@@ -268,8 +235,8 @@ class DeformableObjectData:
 
     @property
     def root_vel_w(self) -> wp.array:
-        """Root velocity from vertex velocities for the deformable bodies in simulation world frame.
-        Shape is (num_instances, 3).
+        """Root velocity from vertex velocities for the deformable bodies in simulation world frame [m/s].
+        Shape is (num_instances,) vec3f.
 
         This quantity is computed as the mean of the nodal velocities.
         """

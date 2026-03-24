@@ -3,14 +3,26 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-from isaaclab_newton.physics import NewtonCfg, VBDSolverCfg
+import importlib
+import os
 
+from isaaclab.assets.deformable_object import DeformableObjectCfg
 from isaaclab.envs import DirectRLEnvCfg
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sim import SimulationCfg
 from isaaclab.utils import configclass
+from isaaclab_newton.physics import NewtonCfg, VBDSolverCfg
 
 from isaaclab_tasks.utils import PresetCfg
+
+# Claude Code: Defer `import newton` to avoid pulling in pxr before SimulationApp starts (Kit crash).
+_newton_spec = importlib.util.find_spec("newton")
+_SHIRT_USD = os.path.join(
+    os.path.dirname(_newton_spec.origin),
+    "examples",
+    "assets",
+    "unisex_shirt.usd",
+)
 
 
 @configclass
@@ -34,8 +46,7 @@ class DropClothPhysicsCfg(PresetCfg):
             rigid_contact_k_start=soft_contact_ke,
         ),
         num_substeps=10,
-        use_cuda_graph=False,  # Disable for debugging; re-enable once working
-        # use_cuda_graph=True,
+        use_cuda_graph=False,
     )
     newton: NewtonCfg = default
 
@@ -50,11 +61,30 @@ class DropClothEnvCfg(DirectRLEnvCfg):
     observation_space = 1
     state_space = 0
 
-    # simulation — dt per physics step (before substeps)
+    # simulation
     sim: SimulationCfg = SimulationCfg(dt=1 / 60, render_interval=decimation, physics=DropClothPhysicsCfg())
 
-    # scene — single environment, no robot
+    # scene
     scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=1, env_spacing=4.0, replicate_physics=False)
 
-    # cloth drop height above the ground [m]
-    cloth_drop_height: float = 0.5
+    # cloth asset — mesh is loaded from an external USD file (not spawned into the stage)
+    cloth: DeformableObjectCfg = DeformableObjectCfg(
+        prim_path="/World/envs/env_.*/cloth",
+        spawn=None,
+        init_state=DeformableObjectCfg.InitialStateCfg(
+            pos=(0.0, 0.0, 0.5),
+            rot=(0.0, 0.0, 1.0, 0.0),  # 180° around z-axis (w, x, y, z)
+        ),
+        mesh_usd_path=_SHIRT_USD,
+        mesh_prim_path="/root/shirt",
+        mesh_scale=0.01,  # shirt USD vertices are in cm → convert to meters
+        density=0.02,
+        tri_ke=1e4,
+        tri_ka=1e4,
+        tri_kd=1.5e-6,
+        edge_ke=5.0,
+        edge_kd=1e-2,
+        particle_radius=0.008,
+        soft_contact_ke=1e4,
+        soft_contact_kd=1e-2,
+    )

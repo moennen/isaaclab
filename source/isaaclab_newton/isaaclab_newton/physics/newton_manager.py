@@ -480,7 +480,9 @@ class NewtonManager(PhysicsManager):
                 cfg_dict = {k: v for k, v in cfg_dict.items() if k in valid_solver_args}
                 logger.info(f"VBD: Creating SolverVBD with args: {cfg_dict}")
                 logger.info(f"VBD: model particle_count={getattr(cls._model, 'particle_count', 'N/A')}")
-                logger.info(f"VBD: model particle_color_groups has {len(getattr(cls._model, 'particle_color_groups', []))} groups")
+                logger.info(
+                    f"VBD: model particle_color_groups has {len(getattr(cls._model, 'particle_color_groups', []))} groups"
+                )
                 cls._solver = SolverVBD(cls._model, **cfg_dict)
                 logger.info("VBD: SolverVBD created successfully")
             else:

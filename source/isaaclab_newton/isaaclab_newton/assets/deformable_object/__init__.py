@@ -2,3 +2,9 @@
 # All rights reserved.
 #
 # SPDX-License-Identifier: BSD-3-Clause
+
+"""Sub-module for Newton deformable object assets."""
+
+from isaaclab.utils.module import lazy_export
+
+lazy_export()
