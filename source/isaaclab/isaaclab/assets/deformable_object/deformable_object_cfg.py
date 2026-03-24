@@ -55,10 +55,6 @@ class DeformableObjectCfg(AssetBaseCfg):
     particle_radius: float = 0.008
     """Particle radius [m]. Used by Newton backend only."""
 
-    mesh_scale: float = 1.0
-    """Uniform scale applied to mesh vertices before building the cloth [unitless].
-    Use this to convert mesh units (e.g. 0.01 for cm → m). Used by Newton backend only."""
-
     mesh_usd_path: str | None = None
     """Path to an external USD file containing the mesh geometry.
     When set, the Newton backend reads the mesh from this file instead of from the stage prim.

@@ -418,7 +418,7 @@ class DeformableObject(BaseDeformableObject):
             builder.add_cloth_mesh(
                 pos=cloth_pos,
                 rot=cloth_rot,
-                scale=self.cfg.mesh_scale,
+                scale=1.0,
                 vel=wp.vec3(0.0, 0.0, 0.0),
                 vertices=vertices,
                 indices=mesh_indices,

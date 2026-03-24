@@ -164,3 +164,11 @@ class MeshFromFileCfg(MeshCfg):
     If None, the file's default prim is used. If the file has no default prim,
     the first ``UsdGeom.Mesh`` child of the pseudo-root is used.
     """
+
+    scale: tuple[float, float, float] | float | None = None
+    """Scale applied to mesh vertices before writing to the stage.
+
+    Use this to convert mesh units (e.g. ``0.01`` or ``(0.01, 0.01, 0.01)`` for cm to m).
+    Unlike Xform scale, this modifies the actual vertex positions so the geometry in the
+    stage is in the correct units. A scalar value is broadcast to all three axes.
+    """

@@ -346,6 +346,14 @@ def spawn_mesh_from_file(
             idx += count
         faces = np.array(tris, dtype=np.int32)
 
+    # Apply vertex scale if specified (e.g. cm → m conversion)
+    if cfg.scale is not None:
+        if isinstance(cfg.scale, (int, float)):
+            scale_vec = np.array([cfg.scale, cfg.scale, cfg.scale], dtype=np.float32)
+        else:
+            scale_vec = np.array(cfg.scale, dtype=np.float32)
+        pts = pts * scale_vec
+
     # Create a trimesh object
     mesh = trimesh.Trimesh(vertices=pts, faces=faces, process=False)
 

@@ -75,13 +75,13 @@ class DropClothEnvCfg(DirectRLEnvCfg):
         spawn=MeshFromFileCfg(
             usd_path=_SHIRT_USD,
             usd_prim_path="/root/shirt",
+            scale=0.01,  # shirt USD vertices are in cm → convert to meters
             visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.2, 0.2, 0.8)),
         ),
         init_state=DeformableObjectCfg.InitialStateCfg(
             pos=(0.0, 0.0, 0.5),
             rot=(0.0, 0.0, 1.0, 0.0),  # 180° around z-axis (w, x, y, z)
         ),
-        mesh_scale=0.01,  # shirt USD vertices are in cm → convert to meters
         density=0.02,
         tri_ke=1e4,
         tri_ka=1e4,
