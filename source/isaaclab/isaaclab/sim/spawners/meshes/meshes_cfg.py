@@ -140,3 +140,27 @@ class MeshConeCfg(MeshCfg):
     """Height of the v (in m)."""
     axis: Literal["X", "Y", "Z"] = "Z"
     """Axis of the cone. Defaults to "Z"."""
+
+
+@configclass
+class MeshFromFileCfg(MeshCfg):
+    """Configuration parameters for spawning a mesh prim from a USD file.
+
+    Loads mesh geometry (vertices + faces) from an external USD file and creates
+    a ``UsdGeom.Mesh`` prim in the stage. This is useful for cloth or deformable meshes
+    stored as bare geometry without physics APIs.
+
+    See :meth:`spawn_mesh_from_file` for more information.
+    """
+
+    func: Callable | str = "{DIR}.meshes:spawn_mesh_from_file"
+
+    usd_path: str = MISSING
+    """Path to the USD file containing the mesh geometry."""
+
+    usd_prim_path: str | None = None
+    """Prim path within the USD file to read the mesh from (e.g. ``/root/shirt``).
+
+    If None, the file's default prim is used. If the file has no default prim,
+    the first ``UsdGeom.Mesh`` child of the pseudo-root is used.
+    """

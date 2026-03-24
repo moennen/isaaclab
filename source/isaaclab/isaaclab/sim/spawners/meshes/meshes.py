@@ -256,6 +256,107 @@ def spawn_mesh_cone(
     return stage.GetPrimAtPath(prim_path)
 
 
+@clone
+def spawn_mesh_from_file(
+    prim_path: str,
+    cfg: meshes_cfg.MeshFromFileCfg,
+    translation: tuple[float, float, float] | None = None,
+    orientation: tuple[float, float, float, float] | None = None,
+    **kwargs,
+) -> Usd.Prim:
+    """Create a USD-Mesh prim from mesh geometry in an external USD file.
+
+    Reads vertices and face indices from a USD file and spawns them as a
+    ``UsdGeom.Mesh`` prim in the current stage. This avoids USD reference
+    composition issues with files that lack a ``defaultPrim``.
+
+    .. note::
+        This function is decorated with :func:`clone` that resolves prim path into list of paths
+        if the input prim path is a regex pattern. This is done to support spawning multiple assets
+        from a single and cloning the USD prim at the given path expression.
+
+    Args:
+        prim_path: The prim path or pattern to spawn the asset at. If the prim path is a regex pattern,
+            then the asset is spawned at all the matching prim paths.
+        cfg: The configuration instance.
+        translation: The translation to apply to the prim w.r.t. its parent prim. Defaults to None, in which case
+            this is set to the origin.
+        orientation: The orientation in (x, y, z, w) to apply to the prim w.r.t. its parent prim. Defaults to None,
+            in which case this is set to identity.
+        **kwargs: Additional keyword arguments, like ``clone_in_fabric``.
+
+    Returns:
+        The created prim.
+
+    Raises:
+        ValueError: If a prim already exists at the given path.
+        FileNotFoundError: If the USD file does not exist.
+        RuntimeError: If no mesh geometry is found in the USD file.
+    """
+    from pxr import UsdGeom
+
+    # Open the external USD file
+    ext_stage = Usd.Stage.Open(cfg.usd_path)
+    if ext_stage is None:
+        raise FileNotFoundError(f"USD file not found at path: '{cfg.usd_path}'.")
+
+    # Find the mesh prim in the external stage
+    mesh_prim = None
+    if cfg.usd_prim_path is not None:
+        mesh_prim = ext_stage.GetPrimAtPath(cfg.usd_prim_path)
+        if not mesh_prim.IsValid():
+            raise RuntimeError(f"Prim '{cfg.usd_prim_path}' not found in '{cfg.usd_path}'.")
+    else:
+        # Try default prim
+        default_prim = ext_stage.GetDefaultPrim()
+        if default_prim and default_prim.IsValid():
+            mesh_prim = default_prim
+        else:
+            # Search for first Mesh child
+            for child in ext_stage.GetPseudoRoot().GetAllChildren():
+                if child.IsA(UsdGeom.Mesh):
+                    mesh_prim = child
+                    break
+                for grandchild in child.GetAllChildren():
+                    if grandchild.IsA(UsdGeom.Mesh):
+                        mesh_prim = grandchild
+                        break
+                if mesh_prim is not None:
+                    break
+
+    if mesh_prim is None:
+        raise RuntimeError(f"No mesh geometry found in '{cfg.usd_path}'.")
+
+    # Read mesh data
+    usd_mesh = UsdGeom.Mesh(mesh_prim)
+    pts = np.array(usd_mesh.GetPointsAttr().Get(), dtype=np.float32)
+    face_indices = np.array(usd_mesh.GetFaceVertexIndicesAttr().Get(), dtype=np.int32)
+    face_counts = np.array(usd_mesh.GetFaceVertexCountsAttr().Get(), dtype=np.int32)
+
+    # Triangulate if needed (trimesh expects all triangles)
+    if np.all(face_counts == 3):
+        faces = face_indices.reshape(-1, 3)
+    else:
+        # Manual fan triangulation for mixed quads/tris
+        tris = []
+        idx = 0
+        for count in face_counts:
+            for i in range(1, count - 1):
+                tris.append([face_indices[idx], face_indices[idx + i], face_indices[idx + i + 1]])
+            idx += count
+        faces = np.array(tris, dtype=np.int32)
+
+    # Create a trimesh object
+    mesh = trimesh.Trimesh(vertices=pts, faces=faces, process=False)
+
+    # Obtain stage handle
+    stage = get_current_stage()
+    # Spawn the mesh
+    _spawn_mesh_geom_from_mesh(prim_path, cfg, mesh, translation, orientation, stage=stage)
+    # Return the prim
+    return stage.GetPrimAtPath(prim_path)
+
+
 """
 Helper functions.
 """

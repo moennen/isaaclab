@@ -6,11 +6,12 @@
 import importlib
 import os
 
+import isaaclab.sim as sim_utils
 from isaaclab.assets.deformable_object import DeformableObjectCfg
 from isaaclab.envs import DirectRLEnvCfg
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sim import SimulationCfg
-from isaaclab.sim.spawners.from_files import UsdFileCfg
+from isaaclab.sim.spawners.meshes import MeshFromFileCfg
 from isaaclab.utils import configclass
 from isaaclab_newton.physics import NewtonCfg, VBDSolverCfg
 
@@ -68,15 +69,18 @@ class DropClothEnvCfg(DirectRLEnvCfg):
     # scene
     scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=1, env_spacing=4.0, replicate_physics=False)
 
-    # cloth asset — spawn references the shirt USD, mesh_prim_path targets the mesh inside it
+    # cloth asset — mesh geometry loaded from USD file and spawned as UsdGeom.Mesh prim
     cloth: DeformableObjectCfg = DeformableObjectCfg(
         prim_path="/World/envs/env_.*/cloth",
-        spawn=UsdFileCfg(usd_path=_SHIRT_USD),
+        spawn=MeshFromFileCfg(
+            usd_path=_SHIRT_USD,
+            usd_prim_path="/root/shirt",
+            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.2, 0.2, 0.8)),
+        ),
         init_state=DeformableObjectCfg.InitialStateCfg(
             pos=(0.0, 0.0, 0.5),
             rot=(0.0, 0.0, 1.0, 0.0),  # 180° around z-axis (w, x, y, z)
         ),
-        mesh_prim_path="/root/shirt",
         mesh_scale=0.01,  # shirt USD vertices are in cm → convert to meters
         density=0.02,
         tri_ke=1e4,
