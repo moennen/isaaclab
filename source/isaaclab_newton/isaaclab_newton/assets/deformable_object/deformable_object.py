@@ -318,15 +318,12 @@ class DeformableObject(BaseDeformableObject):
             return wp.from_torch(env_ids.to(torch.int32), dtype=wp.int32)
         return env_ids
 
-    def _add_cloth_to_builder(self, payload=None) -> None:
+    def _add_cloth_to_builder(self, payload) -> None:
         """Add cloth meshes to the Newton ModelBuilder.
 
-        Called during MODEL_INIT, before ``builder.finalize()``. Reads the mesh from the USD prim
-        at :attr:`cfg.prim_path` and adds one cloth instance per environment.
+        Called during MODEL_INIT, before ``builder.finalize()``. Reads the already-scaled
+        mesh geometry from the spawned stage prim and adds one cloth instance per environment.
         """
-
-        import newton
-
         builder = SimulationManager._builder
         if builder is None:
             return
@@ -334,65 +331,32 @@ class DeformableObject(BaseDeformableObject):
         # Determine number of environments
         num_envs = SimulationManager._num_envs or 1
 
-        # Read the mesh from USD — either from an external file or from the stage
-        if self.cfg.mesh_usd_path is not None:
-            # Read mesh from external USD file (avoids stage composition issues)
-            ext_stage = Usd.Stage.Open(self.cfg.mesh_usd_path)
-            prim_path = self.cfg.mesh_prim_path
-            if prim_path is None:
-                # Try default prim
-                default_prim = ext_stage.GetDefaultPrim()
-                if default_prim and default_prim.IsValid():
-                    prim_path = default_prim.GetPath().pathString
-                else:
-                    raise RuntimeError(
-                        f"No mesh_prim_path specified and '{self.cfg.mesh_usd_path}' has no default prim."
-                    )
-            ext_prim = ext_stage.GetPrimAtPath(prim_path)
-            if not ext_prim.IsValid():
-                raise RuntimeError(f"Prim '{prim_path}' not found in '{self.cfg.mesh_usd_path}'.")
+        # Read mesh from the spawned stage prim
+        template_prim = sim_utils.find_first_matching_prim(self.cfg.prim_path)
+        if template_prim is None:
+            raise RuntimeError(f"Failed to find prim for expression: '{self.cfg.prim_path}'.")
 
-            try:
-                ext_mesh = newton.usd.get_mesh(ext_prim)
-                mesh_points = ext_mesh.vertices
-                mesh_indices = ext_mesh.indices
-            except Exception:
-                usd_mesh = UsdGeom.Mesh(ext_prim)
-                mesh_points = np.array(usd_mesh.GetPointsAttr().Get(), dtype=np.float32)
-                mesh_indices = list(usd_mesh.GetFaceVertexIndicesAttr().Get())
+        # Find the UsdGeom.Mesh descendant (spawner places it at {prim}/geometry/mesh)
+        mesh_prim = None
+        if template_prim.IsA(UsdGeom.Mesh):
+            mesh_prim = template_prim
         else:
-            # Read mesh from stage prim
-            template_prim = sim_utils.find_first_matching_prim(self.cfg.prim_path)
-            if template_prim is None:
-                raise RuntimeError(f"Failed to find prim for expression: '{self.cfg.prim_path}'.")
+            for desc in Usd.PrimRange(template_prim):
+                if desc != template_prim and desc.IsA(UsdGeom.Mesh):
+                    mesh_prim = desc
+                    break
 
-            mesh_prim = None
-            if template_prim.IsA(UsdGeom.Mesh):
-                mesh_prim = template_prim
-            else:
-                # Search all descendants (mesh may be nested, e.g. {prim}/geometry/mesh)
-                for desc in Usd.PrimRange(template_prim):
-                    if desc != template_prim and desc.IsA(UsdGeom.Mesh):
-                        mesh_prim = desc
-                        break
+        if mesh_prim is None:
+            raise RuntimeError(
+                f"No UsdGeom.Mesh found at or under '{self.cfg.prim_path}'. "
+                "Please ensure the spawn config creates a mesh prim (e.g. MeshFromFileCfg)."
+            )
 
-            if mesh_prim is None:
-                try:
-                    ext_mesh = newton.usd.get_mesh(template_prim)
-                    mesh_points = ext_mesh.vertices
-                    mesh_indices = ext_mesh.indices
-                except Exception:
-                    raise RuntimeError(
-                        f"Failed to find mesh data at '{self.cfg.prim_path}'. "
-                        "Please ensure the prim has a UsdGeom.Mesh or is readable by newton.usd.get_mesh."
-                    )
-            else:
-                usd_mesh = UsdGeom.Mesh(mesh_prim)
-                mesh_points = np.array(usd_mesh.GetPointsAttr().Get(), dtype=np.float32)
-                mesh_indices = list(usd_mesh.GetFaceVertexIndicesAttr().Get())
+        usd_mesh = UsdGeom.Mesh(mesh_prim)
+        mesh_points = np.array(usd_mesh.GetPointsAttr().Get(), dtype=np.float32)
+        mesh_indices = list(usd_mesh.GetFaceVertexIndicesAttr().Get())
 
-        # Scale vertices (e.g., cm to m conversion)
-        # The scale is applied to the raw mesh points
+        # Vertices are already in the correct units (scaled by the spawner)
         vertices = [wp.vec3(float(p[0]), float(p[1]), float(p[2])) for p in mesh_points]
 
         # Get initial pose from config

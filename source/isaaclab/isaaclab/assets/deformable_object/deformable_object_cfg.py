@@ -55,15 +55,6 @@ class DeformableObjectCfg(AssetBaseCfg):
     particle_radius: float = 0.008
     """Particle radius [m]. Used by Newton backend only."""
 
-    mesh_usd_path: str | None = None
-    """Path to an external USD file containing the mesh geometry.
-    When set, the Newton backend reads the mesh from this file instead of from the stage prim.
-    Used by Newton backend only."""
-
-    mesh_prim_path: str | None = None
-    """Prim path within the external USD file to read the mesh from (e.g. ``/root/shirt``).
-    Required when :attr:`mesh_usd_path` is set. Used by Newton backend only."""
-
     soft_contact_ke: float = 1e4
     """Body-particle contact stiffness. Used by Newton backend only."""
 
