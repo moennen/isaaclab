@@ -66,6 +66,15 @@ class DeformableObject(BaseDeformableObject):
         self._recorded_particle_offsets: list[int] = []
         self._recorded_particles_per_body: int = 0
 
+        # If spawn is a UsdFileCfg, handle the spawning ourselves to support USD files
+        # without a defaultPrim (e.g. shirt meshes). We use mesh_prim_path as the reference
+        # target inside the USD file. After spawning, the mesh is readable from the stage prim.
+        if cfg.spawn is not None and cfg.mesh_usd_path is None:
+            self._spawn_usd_prim(cfg)
+            # Prevent AssetBase from re-spawning
+            cfg = cfg.copy()
+            cfg.spawn = None
+
         # Register MODEL_INIT callback to add cloth mesh to the Newton builder.
         # This must happen before finalize() is called.
         self._model_init_handle = SimulationManager.register_callback(
@@ -307,6 +316,46 @@ class DeformableObject(BaseDeformableObject):
     """
     Internal helper.
     """
+
+    def _spawn_usd_prim(self, cfg) -> None:
+        """Spawn a USD prim for the cloth mesh at the template prim path.
+
+        Handles USD files without a ``defaultPrim`` by adding a reference with an explicit
+        target prim path (``cfg.mesh_prim_path``). This avoids composition errors that occur
+        when the standard ``UsdFileCfg`` spawner encounters USD files without a default prim.
+        """
+        from pxr import Sdf, Usd
+
+        from isaaclab.sim.utils.stage import get_current_stage
+
+        # Resolve template prim path (env_0)
+        prim_path = cfg.prim_path
+        if "/env_" in prim_path and ".*" in prim_path:
+            prim_path = prim_path.replace("env_.*", "env_0")
+        elif "*" in prim_path:
+            prim_path = prim_path.replace("*", "0")
+
+        stage = get_current_stage()
+        if stage.GetPrimAtPath(prim_path).IsValid():
+            return  # Already spawned
+
+        # Get USD file path from spawn config
+        usd_path = cfg.spawn.usd_path if hasattr(cfg.spawn, "usd_path") else None
+        if usd_path is None:
+            return
+
+        # Create the prim and add reference with explicit target prim path
+        prim = stage.DefinePrim(prim_path, "Xform")
+        ref_prim_path = Sdf.Path(cfg.mesh_prim_path) if cfg.mesh_prim_path else Sdf.Path()
+        prim.GetReferences().AddReference(usd_path, primPath=ref_prim_path)
+
+        # Apply scale from spawn config if provided
+        if hasattr(cfg.spawn, "scale") and cfg.spawn.scale is not None:
+            from pxr import UsdGeom
+
+            xformable = UsdGeom.Xformable(prim)
+            xformable.ClearXformOpOrder()
+            xformable.AddScaleOp().Set(cfg.spawn.scale)
 
     def _resolve_env_ids(self, env_ids):
         """Resolve environment indices to a warp int32 array."""
@@ -599,9 +648,11 @@ class DeformableObject(BaseDeformableObject):
     """
 
     def _create_cloth_vis_prim(self) -> None:
-        """Create UsdGeom.Mesh prims for Kit viewport rendering.
+        """Set up UsdGeom.Mesh prims for Kit viewport rendering.
 
-        One prim per instance, updated every render step from Newton particle state.
+        Uses the spawned prim at ``cfg.prim_path`` (one per env instance).
+        If the prim already has mesh topology from the USD reference, we just update the
+        points each step. Otherwise, we author the topology from ``model.tri_indices``.
         """
         from pxr import Gf, Sdf, Vt
 
@@ -618,34 +669,39 @@ class DeformableObject(BaseDeformableObject):
 
         # Get triangle topology from model
         tri_idx = model.tri_indices.numpy().reshape(-1, 3)
-        # Compute per-instance triangle indices (offset from instance's particle range)
         self._vis_prims = []
 
         for inst_idx in range(self._num_instances):
-            prim_path = f"/World/cloth_vis_{inst_idx}"
+            # Resolve the prim path for this instance (e.g. /World/envs/env_0/cloth)
+            prim_path = self.cfg.prim_path.replace("env_.*", f"env_{inst_idx}").replace("*", str(inst_idx))
             offset = self._recorded_particle_offsets[inst_idx]
 
-            # Get this instance's triangle indices relative to its particle range
-            # Filter triangles that belong to this instance
-            mask = (tri_idx >= offset) & (tri_idx < offset + self._particles_per_body)
-            mask = mask.all(axis=1)
-            inst_tris = tri_idx[mask] - offset
+            prim = stage.GetPrimAtPath(prim_path)
+            if prim.IsValid() and prim.IsA(UsdGeom.Mesh):
+                # Prim was spawned as a mesh — reuse it
+                mesh = UsdGeom.Mesh(prim)
+            else:
+                # Need to author a mesh prim (or convert the Xform to a Mesh)
+                # Filter triangles that belong to this instance
+                mask = (tri_idx >= offset) & (tri_idx < offset + self._particles_per_body)
+                mask = mask.all(axis=1)
+                inst_tris = tri_idx[mask] - offset
 
-            if len(inst_tris) == 0:
-                continue
+                if len(inst_tris) == 0:
+                    continue
 
-            face_vertex_indices = Vt.IntArray(inst_tris.flatten().tolist())
-            face_vertex_counts = Vt.IntArray([3] * len(inst_tris))
+                face_vertex_indices = Vt.IntArray(inst_tris.flatten().tolist())
+                face_vertex_counts = Vt.IntArray([3] * len(inst_tris))
 
-            # Initial vertex positions
+                mesh = UsdGeom.Mesh.Define(stage, Sdf.Path(prim_path))
+                mesh.GetFaceVertexIndicesAttr().Set(face_vertex_indices)
+                mesh.GetFaceVertexCountsAttr().Set(face_vertex_counts)
+                mesh.GetSubdivisionSchemeAttr().Set(UsdGeom.Tokens.none)
+
+            # Set initial vertex positions
             pts_np = state.particle_q.numpy()[offset : offset + self._particles_per_body]
             points = Vt.Vec3fArray([Gf.Vec3f(float(p[0]), float(p[1]), float(p[2])) for p in pts_np])
-
-            mesh = UsdGeom.Mesh.Define(stage, Sdf.Path(prim_path))
             mesh.GetPointsAttr().Set(points)
-            mesh.GetFaceVertexIndicesAttr().Set(face_vertex_indices)
-            mesh.GetFaceVertexCountsAttr().Set(face_vertex_counts)
-            mesh.GetSubdivisionSchemeAttr().Set(UsdGeom.Tokens.none)
 
             self._vis_prims.append((mesh, offset))
 
