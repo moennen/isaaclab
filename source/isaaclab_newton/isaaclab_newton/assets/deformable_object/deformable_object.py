@@ -553,82 +553,62 @@ class DeformableObject(BaseDeformableObject):
             model.soft_contact_ke = self.cfg.soft_contact_ke
             model.soft_contact_kd = self.cfg.soft_contact_kd
 
-        # Create USD visualization prim (Kit only)
+        # Bind spawned mesh prims for Kit viewport updates (Kit only)
         if not SimulationManager._clone_physics_only:
-            self._create_cloth_vis_prim()
+            self._bind_cloth_vis_prims()
 
     """
     USD mesh visualization (Kit only).
     """
 
-    def _create_cloth_vis_prim(self) -> None:
-        """Set up UsdGeom.Mesh prims for Kit viewport rendering.
+    def _bind_cloth_vis_prims(self) -> None:
+        """Bind spawned mesh prims for dynamic point updates in Kit viewport.
 
-        Finds the spawned mesh prim (typically at ``{prim_path}/geometry/mesh``) and
-        reuses it for dynamic point updates. This keeps any visual material that was
-        applied by the spawner. If no spawned mesh is found, authors a new one from
-        ``model.tri_indices``.
+        Finds the spawned ``UsdGeom.Mesh`` prim for each instance (typically at
+        ``{prim_path}/geometry/mesh``), clears parent Xform transforms (Newton writes
+        world-space positions), writes initial points, and stores references for
+        per-step updates via :meth:`_update_cloth_vis`.
         """
-        from pxr import Gf, Sdf, Vt
+        from pxr import Gf, Vt
 
         from isaaclab.sim.utils.stage import get_current_stage
 
-        model = SimulationManager._model
-        if model is None:
-            return
-
-        stage = get_current_stage()
         state = SimulationManager._state_0
         if state is None or state.particle_q is None:
             return
 
-        # Get triangle topology from model
-        tri_idx = model.tri_indices.numpy().reshape(-1, 3)
+        stage = get_current_stage()
         self._vis_prims = []
 
         for inst_idx in range(self._num_instances):
-            # Resolve the prim path for this instance (e.g. /World/envs/env_0/cloth)
             base_path = self.cfg.prim_path.replace("env_.*", f"env_{inst_idx}").replace("*", str(inst_idx))
             offset = self._recorded_particle_offsets[inst_idx]
 
-            # Find the spawned mesh prim — search descendants for a UsdGeom.Mesh
-            mesh = None
             base_prim = stage.GetPrimAtPath(base_path)
-            if base_prim.IsValid():
-                if base_prim.IsA(UsdGeom.Mesh):
-                    mesh = UsdGeom.Mesh(base_prim)
-                else:
-                    for desc in Usd.PrimRange(base_prim):
-                        if desc != base_prim and desc.IsA(UsdGeom.Mesh):
-                            mesh = UsdGeom.Mesh(desc)
-                            break
+            if not base_prim.IsValid():
+                continue
 
-                # Clear any Xform scale on ancestors — Newton's particle positions
-                # are already in world-space meters, so parent transforms must be identity.
-                for ancestor in Usd.PrimRange(base_prim):
-                    if ancestor.IsA(UsdGeom.Xformable):
-                        xformable = UsdGeom.Xformable(ancestor)
-                        xformable.ClearXformOpOrder()
+            # Find the spawned UsdGeom.Mesh descendant
+            mesh = None
+            if base_prim.IsA(UsdGeom.Mesh):
+                mesh = UsdGeom.Mesh(base_prim)
+            else:
+                for desc in Usd.PrimRange(base_prim):
+                    if desc != base_prim and desc.IsA(UsdGeom.Mesh):
+                        mesh = UsdGeom.Mesh(desc)
+                        break
 
             if mesh is None:
-                # No spawned mesh found — create one with topology from model
-                mask = (tri_idx >= offset) & (tri_idx < offset + self._particles_per_body)
-                mask = mask.all(axis=1)
-                inst_tris = tri_idx[mask] - offset
+                logger.warning(f"No UsdGeom.Mesh found under '{base_path}' — skipping Kit visualization for env {inst_idx}.")
+                continue
 
-                if len(inst_tris) == 0:
-                    continue
+            # Clear Xform transforms on all ancestors under base_prim — Newton's
+            # particle positions are already in world-space meters.
+            for desc in Usd.PrimRange(base_prim):
+                if desc.IsA(UsdGeom.Xformable):
+                    UsdGeom.Xformable(desc).ClearXformOpOrder()
 
-                face_vertex_indices = Vt.IntArray(inst_tris.flatten().tolist())
-                face_vertex_counts = Vt.IntArray([3] * len(inst_tris))
-
-                mesh_path = base_path + "/geometry/mesh"
-                mesh = UsdGeom.Mesh.Define(stage, Sdf.Path(mesh_path))
-                mesh.GetFaceVertexIndicesAttr().Set(face_vertex_indices)
-                mesh.GetFaceVertexCountsAttr().Set(face_vertex_counts)
-                mesh.GetSubdivisionSchemeAttr().Set(UsdGeom.Tokens.none)
-
-            # Set initial vertex positions from Newton particle state
+            # Write initial vertex positions from Newton particle state
             pts_np = state.particle_q.numpy()[offset : offset + self._particles_per_body]
             points = Vt.Vec3fArray([Gf.Vec3f(float(p[0]), float(p[1]), float(p[2])) for p in pts_np])
             mesh.GetPointsAttr().Set(points)
