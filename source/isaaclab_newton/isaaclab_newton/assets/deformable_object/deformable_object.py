@@ -339,40 +339,53 @@ class DeformableObject(BaseDeformableObject):
         if template_prim is None:
             raise RuntimeError(f"Failed to find prim for expression: '{self.cfg.prim_path}'.")
 
+        # Find the mesh descendant — either UsdGeom.TetMesh or UsdGeom.Mesh
+        has_tet_type = hasattr(UsdGeom, "TetMesh")
         mesh_prim = None
-        if template_prim.IsA(UsdGeom.Mesh):
+        if has_tet_type and template_prim.IsA(UsdGeom.TetMesh):
+            mesh_prim = template_prim
+        elif template_prim.IsA(UsdGeom.Mesh):
             mesh_prim = template_prim
         else:
             for desc in Usd.PrimRange(template_prim):
-                if desc != template_prim and desc.IsA(UsdGeom.Mesh):
+                if desc == template_prim:
+                    continue
+                if has_tet_type and desc.IsA(UsdGeom.TetMesh):
+                    mesh_prim = desc
+                    break
+                if desc.IsA(UsdGeom.Mesh):
                     mesh_prim = desc
                     break
 
         if mesh_prim is None:
             raise RuntimeError(
-                f"No UsdGeom.Mesh found at or under '{self.cfg.prim_path}'. "
+                f"No UsdGeom.Mesh or UsdGeom.TetMesh found at or under '{self.cfg.prim_path}'. "
                 "Please ensure the spawn config creates a mesh prim (e.g. MeshFromFileCfg or TetMeshCuboidCfg)."
             )
 
-        # Read vertex positions (shared by both tet and cloth paths)
-        usd_mesh = UsdGeom.Mesh(mesh_prim)
-        mesh_points = np.array(usd_mesh.GetPointsAttr().Get(), dtype=np.float32)
-        vertices = [wp.vec3(float(p[0]), float(p[1]), float(p[2])) for p in mesh_points]
-
-        # Check for tet indices (authored by TetMeshCuboidCfg spawner)
-        tet_attr = mesh_prim.GetAttribute("newton:tetIndices")
-        has_tet_mesh = tet_attr.IsValid() and tet_attr.Get() is not None and len(tet_attr.Get()) > 0
+        # Detect whether the prim is a TetMesh (volumetric) or Mesh (surface cloth)
+        has_tet_mesh = mesh_prim.IsA(UsdGeom.TetMesh) if hasattr(UsdGeom, "TetMesh") else False
 
         if has_tet_mesh:
-            tet_indices = list(tet_attr.Get())
+            tet_mesh = UsdGeom.TetMesh(mesh_prim)
+            tet_points = np.array(tet_mesh.GetPointsAttr().Get(), dtype=np.float32)
+            vertices = [wp.vec3(float(p[0]), float(p[1]), float(p[2])) for p in tet_points]
+            # TetVertexIndices is Vec4iArray — flatten to list of ints
+            raw_tet_indices = tet_mesh.GetTetVertexIndicesAttr().Get()
+            tet_indices = []
+            for vec4i in raw_tet_indices:
+                tet_indices.extend([int(vec4i[0]), int(vec4i[1]), int(vec4i[2]), int(vec4i[3])])
             logger.info(
-                f"Found tet mesh: {len(mesh_points)} vertices, {len(tet_indices) // 4} tetrahedra. "
+                f"Found UsdGeom.TetMesh: {len(tet_points)} vertices, {len(tet_indices) // 4} tetrahedra. "
                 "Using builder.add_soft_mesh()."
             )
         else:
+            usd_mesh = UsdGeom.Mesh(mesh_prim)
+            mesh_points = np.array(usd_mesh.GetPointsAttr().Get(), dtype=np.float32)
             mesh_indices = list(usd_mesh.GetFaceVertexIndicesAttr().Get())
+            vertices = [wp.vec3(float(p[0]), float(p[1]), float(p[2])) for p in mesh_points]
             logger.info(
-                f"Surface mesh: {len(mesh_points)} vertices. Using builder.add_cloth_mesh()."
+                f"Found UsdGeom.Mesh: {len(mesh_points)} vertices. Using builder.add_cloth_mesh()."
             )
 
         # Get initial pose from config
@@ -592,10 +605,10 @@ class DeformableObject(BaseDeformableObject):
     def _bind_cloth_vis_prims(self) -> None:
         """Bind spawned mesh prims for dynamic point updates in Kit viewport.
 
-        Finds the spawned ``UsdGeom.Mesh`` prim for each instance (typically at
-        ``{prim_path}/geometry/mesh``), clears parent Xform transforms (Newton writes
-        world-space positions), writes initial points, and stores references for
-        per-step updates via :meth:`_update_cloth_vis`.
+        Finds the spawned ``UsdGeom.Mesh`` or ``UsdGeom.TetMesh`` prim for each instance
+        (typically at ``{prim_path}/geometry/mesh``), clears parent Xform transforms
+        (Newton writes world-space positions), writes initial points, and stores
+        references for per-step updates via :meth:`_update_cloth_vis`.
         """
         from pxr import Gf, Vt
 
@@ -606,6 +619,7 @@ class DeformableObject(BaseDeformableObject):
             return
 
         stage = get_current_stage()
+        has_tet_type = hasattr(UsdGeom, "TetMesh")
         self._vis_prims = []
 
         for inst_idx in range(self._num_instances):
@@ -616,18 +630,21 @@ class DeformableObject(BaseDeformableObject):
             if not base_prim.IsValid():
                 continue
 
-            # Find the spawned UsdGeom.Mesh descendant
-            mesh = None
-            if base_prim.IsA(UsdGeom.Mesh):
-                mesh = UsdGeom.Mesh(base_prim)
-            else:
-                for desc in Usd.PrimRange(base_prim):
-                    if desc != base_prim and desc.IsA(UsdGeom.Mesh):
-                        mesh = UsdGeom.Mesh(desc)
-                        break
+            # Find the spawned geometry prim — either TetMesh or Mesh
+            # Both have GetPointsAttr() for dynamic point updates
+            geom_prim = None
+            for candidate in [base_prim] + list(Usd.PrimRange(base_prim)):
+                if candidate == base_prim and not (candidate.IsA(UsdGeom.Mesh) or (has_tet_type and candidate.IsA(UsdGeom.TetMesh))):
+                    continue
+                if has_tet_type and candidate.IsA(UsdGeom.TetMesh):
+                    geom_prim = UsdGeom.TetMesh(candidate)
+                    break
+                if candidate.IsA(UsdGeom.Mesh):
+                    geom_prim = UsdGeom.Mesh(candidate)
+                    break
 
-            if mesh is None:
-                logger.warning(f"No UsdGeom.Mesh found under '{base_path}' — skipping Kit visualization for env {inst_idx}.")
+            if geom_prim is None:
+                logger.warning(f"No UsdGeom.Mesh or TetMesh found under '{base_path}' — skipping Kit visualization for env {inst_idx}.")
                 continue
 
             # Clear Xform transforms on all ancestors under base_prim — Newton's
@@ -636,12 +653,45 @@ class DeformableObject(BaseDeformableObject):
                 if desc.IsA(UsdGeom.Xformable):
                     UsdGeom.Xformable(desc).ClearXformOpOrder()
 
+            # For TetMesh prims, Kit doesn't render them natively in this version.
+            # Create a companion UsdGeom.Mesh with the surface faces for rendering.
+            if has_tet_type and geom_prim.GetPrim().IsA(UsdGeom.TetMesh):
+                from pxr import Sdf
+
+                tet_mesh = UsdGeom.TetMesh(geom_prim.GetPrim())
+                surface_indices = tet_mesh.GetSurfaceFaceVertexIndicesAttr().Get()
+                if surface_indices is not None and len(surface_indices) > 0:
+                    vis_mesh_path = geom_prim.GetPath().pathString + "_vis"
+                    vis_mesh = UsdGeom.Mesh.Define(stage, Sdf.Path(vis_mesh_path))
+                    # Convert Vec3iArray to flat face vertex indices
+                    face_vertex_indices = []
+                    for vec3i in surface_indices:
+                        face_vertex_indices.extend([int(vec3i[0]), int(vec3i[1]), int(vec3i[2])])
+                    vis_mesh.GetFaceVertexIndicesAttr().Set(face_vertex_indices)
+                    vis_mesh.GetFaceVertexCountsAttr().Set([3] * len(surface_indices))
+                    vis_mesh.GetSubdivisionSchemeAttr().Set(UsdGeom.Tokens.none)
+
+                    # Copy material binding from the TetMesh's parent geometry prim
+                    from pxr import UsdShade
+
+                    geom_path = geom_prim.GetPath().GetParentPath()
+                    mat_path = str(geom_path) + "/" + self.cfg.spawn.visual_material_path if hasattr(self.cfg.spawn, "visual_material_path") else None
+                    if mat_path is not None:
+                        mat_prim = stage.GetPrimAtPath(mat_path)
+                        if mat_prim.IsValid():
+                            UsdShade.MaterialBindingAPI.Apply(vis_mesh.GetPrim())
+                            UsdShade.MaterialBindingAPI(vis_mesh.GetPrim()).Bind(
+                                UsdShade.Material(mat_prim), UsdShade.Tokens.weakerThanDescendants
+                            )
+
+                    geom_prim = vis_mesh
+
             # Write initial vertex positions from Newton particle state
             pts_np = state.particle_q.numpy()[offset : offset + self._particles_per_body]
             points = Vt.Vec3fArray([Gf.Vec3f(float(p[0]), float(p[1]), float(p[2])) for p in pts_np])
-            mesh.GetPointsAttr().Set(points)
+            geom_prim.GetPointsAttr().Set(points)
 
-            self._vis_prims.append((mesh, offset))
+            self._vis_prims.append((geom_prim, offset))
 
     def _update_cloth_vis(self) -> None:
         """Write current Newton particle positions into Kit cloth mesh prims."""

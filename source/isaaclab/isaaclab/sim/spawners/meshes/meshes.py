@@ -264,12 +264,17 @@ def spawn_tet_mesh_cuboid(
     orientation: tuple[float, float, float, float] | None = None,
     **kwargs,
 ) -> Usd.Prim:
-    """Create a cuboid mesh prim with tetrahedral volumetric data.
+    """Create a ``UsdGeom.TetMesh`` cuboid prim with tetrahedral volumetric data.
 
     Generates a regular hexahedral grid and decomposes each hex cell into 5 tetrahedra
-    (matching Newton's ``add_soft_grid`` convention). The surface triangles are written as
-    ``UsdGeom.Mesh`` geometry for rendering, and the tet indices are stored as a custom
-    ``int[]`` attribute ``newton:tetIndices`` (4 ints per tet, flattened) on the mesh prim.
+    (matching Newton's ``add_soft_grid`` convention). The prim is authored as a
+    ``UsdGeom.TetMesh`` with:
+
+    - ``points``: vertex positions
+    - ``tetVertexIndices``: tet connectivity (4 ints per tet, flattened)
+    - ``surfaceFaceVertexIndices``: surface triangles for rendering (3 ints per face, flattened)
+
+    The Newton backend detects the ``TetMesh`` type and uses ``builder.add_soft_mesh()``.
 
     .. note::
         This function is decorated with :func:`clone` that resolves prim path into list of paths
@@ -288,6 +293,8 @@ def spawn_tet_mesh_cuboid(
     Raises:
         ValueError: If a prim already exists at the given path.
     """
+    from pxr import Gf, Sdf, UsdGeom, Vt
+
     sx, sy, sz = cfg.size
     n = cfg.resolution
 
@@ -300,8 +307,7 @@ def spawn_tet_mesh_cuboid(
     for iz in range(n + 1):
         for iy in range(n + 1):
             for ix in range(n + 1):
-                vertices.append([ox + ix * cell_x, oy + iy * cell_y, oz + iz * cell_z])
-    vertices = np.array(vertices, dtype=np.float32)
+                vertices.append(Gf.Vec3f(ox + ix * cell_x, oy + iy * cell_y, oz + iz * cell_z))
 
     def grid_index(x, y, z):
         return (n + 1) * (n + 1) * z + (n + 1) * y + x
@@ -342,24 +348,39 @@ def spawn_tet_mesh_cuboid(
                     add_face(i, l, k)
 
     # Surface triangles from open faces
-    surface_faces = np.array(list(faces.values()), dtype=np.int32)
+    surface_indices = []
+    for tri in faces.values():
+        surface_indices.extend(tri)
 
-    # Create a trimesh from the surface for the USD prim
-    mesh = trimesh.Trimesh(vertices=vertices, faces=surface_faces, process=False)
-
-    # Obtain stage handle
+    # Create parent Xform with transform
     stage = get_current_stage()
-    # Spawn the surface mesh as UsdGeom.Mesh
-    _spawn_mesh_geom_from_mesh(prim_path, cfg, mesh, translation, orientation, stage=stage)
+    if stage.GetPrimAtPath(prim_path).IsValid():
+        raise ValueError(f"A prim already exists at path: '{prim_path}'.")
+    create_prim(prim_path, prim_type="Xform", translation=translation, orientation=orientation, stage=stage)
 
-    # Store tet indices as a custom attribute on the mesh prim
-    from pxr import Sdf, Vt
+    # Create UsdGeom.TetMesh prim
+    tet_mesh_path = prim_path + "/geometry/mesh"
+    tet_mesh = UsdGeom.TetMesh.Define(stage, Sdf.Path(tet_mesh_path))
+    tet_mesh.GetPointsAttr().Set(Vt.Vec3fArray(vertices))
+    tet_mesh.GetTetVertexIndicesAttr().Set(Vt.Vec4iArray(
+        [Gf.Vec4i(tet_indices[i], tet_indices[i + 1], tet_indices[i + 2], tet_indices[i + 3])
+         for i in range(0, len(tet_indices), 4)]
+    ))
+    # surfaceFaceVertexIndices is Vec3iArray (one Vec3i per triangle face).
+    tet_mesh.GetSurfaceFaceVertexIndicesAttr().Set(Vt.Vec3iArray(
+        [Gf.Vec3i(surface_indices[i], surface_indices[i + 1], surface_indices[i + 2])
+         for i in range(0, len(surface_indices), 3)]
+    ))
 
-    mesh_prim_path = prim_path + "/geometry/mesh"
-    mesh_prim = stage.GetPrimAtPath(mesh_prim_path)
-    if mesh_prim.IsValid():
-        tet_attr = mesh_prim.CreateAttribute("newton:tetIndices", Sdf.ValueTypeNames.IntArray, True)
-        tet_attr.Set(Vt.IntArray(tet_indices))
+    # Apply visual material if provided
+    if cfg.visual_material is not None:
+        geom_prim_path = prim_path + "/geometry"
+        if not cfg.visual_material_path.startswith("/"):
+            material_path = f"{geom_prim_path}/{cfg.visual_material_path}"
+        else:
+            material_path = cfg.visual_material_path
+        cfg.visual_material.func(material_path, cfg.visual_material)
+        bind_visual_material(tet_mesh_path, material_path, stage=stage)
 
     return stage.GetPrimAtPath(prim_path)
 
