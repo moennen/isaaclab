@@ -69,9 +69,9 @@ class DeformableObject(BaseDeformableObject):
         # Register MODEL_INIT callback to add cloth mesh to the Newton builder.
         # This must happen before finalize() is called.
         self._model_init_handle = SimulationManager.register_callback(
-            lambda payload: self._add_cloth_to_builder(payload),
+            lambda payload: self._add_deformable_to_builder(payload),
             PhysicsEvent.MODEL_INIT,
-            order=5,  # Run before default (10) to ensure cloth is added before finalize
+            order=5,  # Run before default (10) to ensure mesh is added before finalize
         )
 
         super().__init__(cfg)
@@ -318,25 +318,27 @@ class DeformableObject(BaseDeformableObject):
             return wp.from_torch(env_ids.to(torch.int32), dtype=wp.int32)
         return env_ids
 
-    def _add_cloth_to_builder(self, payload) -> None:
-        """Add cloth meshes to the Newton ModelBuilder.
+    def _add_deformable_to_builder(self, payload) -> None:
+        """Add deformable meshes to the Newton ModelBuilder.
 
-        Called during MODEL_INIT, before ``builder.finalize()``. Reads the already-scaled
-        mesh geometry from the spawned stage prim and adds one cloth instance per environment.
+        Called during MODEL_INIT, before ``builder.finalize()``. Detects whether the
+        spawned prim has tet data (``newton:tetIndices`` attribute from :class:`TetMeshCuboidCfg`)
+        or only a triangle surface mesh, and uses the appropriate Newton builder API:
+
+        - **Tet mesh**: ``builder.add_soft_mesh()``
+        - **Surface mesh** (cloth): ``builder.add_cloth_mesh()``
         """
         builder = SimulationManager._builder
         if builder is None:
             return
 
-        # Determine number of environments
         num_envs = SimulationManager._num_envs or 1
 
-        # Read mesh from the spawned stage prim
+        # Find the spawned mesh prim
         template_prim = sim_utils.find_first_matching_prim(self.cfg.prim_path)
         if template_prim is None:
             raise RuntimeError(f"Failed to find prim for expression: '{self.cfg.prim_path}'.")
 
-        # Find the UsdGeom.Mesh descendant (spawner places it at {prim}/geometry/mesh)
         mesh_prim = None
         if template_prim.IsA(UsdGeom.Mesh):
             mesh_prim = template_prim
@@ -349,51 +351,77 @@ class DeformableObject(BaseDeformableObject):
         if mesh_prim is None:
             raise RuntimeError(
                 f"No UsdGeom.Mesh found at or under '{self.cfg.prim_path}'. "
-                "Please ensure the spawn config creates a mesh prim (e.g. MeshFromFileCfg)."
+                "Please ensure the spawn config creates a mesh prim (e.g. MeshFromFileCfg or TetMeshCuboidCfg)."
             )
 
+        # Read vertex positions (shared by both tet and cloth paths)
         usd_mesh = UsdGeom.Mesh(mesh_prim)
         mesh_points = np.array(usd_mesh.GetPointsAttr().Get(), dtype=np.float32)
-        mesh_indices = list(usd_mesh.GetFaceVertexIndicesAttr().Get())
-
-        # Vertices are already in the correct units (scaled by the spawner)
         vertices = [wp.vec3(float(p[0]), float(p[1]), float(p[2])) for p in mesh_points]
+
+        # Check for tet indices (authored by TetMeshCuboidCfg spawner)
+        tet_attr = mesh_prim.GetAttribute("newton:tetIndices")
+        has_tet_mesh = tet_attr.IsValid() and tet_attr.Get() is not None and len(tet_attr.Get()) > 0
+
+        if has_tet_mesh:
+            tet_indices = list(tet_attr.Get())
+            logger.info(
+                f"Found tet mesh: {len(mesh_points)} vertices, {len(tet_indices) // 4} tetrahedra. "
+                "Using builder.add_soft_mesh()."
+            )
+        else:
+            mesh_indices = list(usd_mesh.GetFaceVertexIndicesAttr().Get())
+            logger.info(
+                f"Surface mesh: {len(mesh_points)} vertices. Using builder.add_cloth_mesh()."
+            )
 
         # Get initial pose from config
         init_pos = self.cfg.init_state.pos if hasattr(self.cfg.init_state, "pos") else (0.0, 0.0, 0.0)
         init_rot = self.cfg.init_state.rot if hasattr(self.cfg.init_state, "rot") else (1.0, 0.0, 0.0, 0.0)
 
-        # Get environment positions for multi-env
         env_positions = self._get_env_positions(num_envs)
 
-        # Add cloth mesh for each environment
         for env_idx in range(num_envs):
             before_count = getattr(builder, "particle_count", 0)
 
-            # Compute per-env position offset
             env_pos = env_positions[env_idx] if env_positions is not None else (0.0, 0.0, 0.0)
-            cloth_pos = wp.vec3(
+            body_pos = wp.vec3(
                 init_pos[0] + env_pos[0],
                 init_pos[1] + env_pos[1],
                 init_pos[2] + env_pos[2],
             )
-            cloth_rot = wp.quat(init_rot[0], init_rot[1], init_rot[2], init_rot[3])
+            body_rot = wp.quat(init_rot[0], init_rot[1], init_rot[2], init_rot[3])
 
-            builder.add_cloth_mesh(
-                pos=cloth_pos,
-                rot=cloth_rot,
-                scale=1.0,
-                vel=wp.vec3(0.0, 0.0, 0.0),
-                vertices=vertices,
-                indices=mesh_indices,
-                density=self.cfg.density,
-                tri_ke=self.cfg.tri_ke,
-                tri_ka=self.cfg.tri_ka,
-                tri_kd=self.cfg.tri_kd,
-                edge_ke=self.cfg.edge_ke,
-                edge_kd=self.cfg.edge_kd,
-                particle_radius=self.cfg.particle_radius,
-            )
+            if has_tet_mesh:
+                builder.add_soft_mesh(
+                    pos=body_pos,
+                    rot=body_rot,
+                    scale=1.0,
+                    vel=wp.vec3(0.0, 0.0, 0.0),
+                    vertices=vertices,
+                    indices=tet_indices,
+                    density=self.cfg.density,
+                    k_mu=self.cfg.k_mu,
+                    k_lambda=self.cfg.k_lambda,
+                    k_damp=self.cfg.k_damp,
+                    particle_radius=self.cfg.particle_radius,
+                )
+            else:
+                builder.add_cloth_mesh(
+                    pos=body_pos,
+                    rot=body_rot,
+                    scale=1.0,
+                    vel=wp.vec3(0.0, 0.0, 0.0),
+                    vertices=vertices,
+                    indices=mesh_indices,
+                    density=self.cfg.density,
+                    tri_ke=self.cfg.tri_ke,
+                    tri_ka=self.cfg.tri_ka,
+                    tri_kd=self.cfg.tri_kd,
+                    edge_ke=self.cfg.edge_ke,
+                    edge_kd=self.cfg.edge_kd,
+                    particle_radius=self.cfg.particle_radius,
+                )
 
             after_count = getattr(builder, "particle_count", 0)
             delta = after_count - before_count
@@ -407,12 +435,12 @@ class DeformableObject(BaseDeformableObject):
                     "All environments must have the same number of particles."
                 )
 
-        # Build vertex colouring required by VBD solver
         builder.color()
 
+        mesh_type = "tet" if has_tet_mesh else "cloth"
         logger.info(
-            f"Newton cloth: {num_envs} instances, {self._recorded_particles_per_body} particles each, "
-            f"offsets={self._recorded_particle_offsets}"
+            f"Newton deformable ({mesh_type}): {num_envs} instances, "
+            f"{self._recorded_particles_per_body} particles each, offsets={self._recorded_particle_offsets}"
         )
 
     def _get_env_positions(self, num_envs: int) -> list[tuple[float, float, float]] | None:

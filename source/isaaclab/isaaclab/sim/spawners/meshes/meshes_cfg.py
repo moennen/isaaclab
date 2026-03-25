@@ -143,6 +143,27 @@ class MeshConeCfg(MeshCfg):
 
 
 @configclass
+class TetMeshCuboidCfg(MeshCfg):
+    """Configuration parameters for a cuboid mesh prim with tetrahedral volumetric data.
+
+    Generates a regular grid of vertices decomposed into tetrahedra (5 tets per hex cell).
+    The surface triangles are written as ``UsdGeom.Mesh`` geometry for rendering, and the
+    tet indices are stored as a custom ``int[]`` attribute ``newton:tetIndices`` on the mesh
+    prim for the Newton backend to read.
+
+    See :meth:`spawn_tet_mesh_cuboid` for more information.
+    """
+
+    func: Callable | str = "{DIR}.meshes:spawn_tet_mesh_cuboid"
+
+    size: tuple[float, float, float] = MISSING
+    """Size of the cuboid (in m) as (x, y, z)."""
+
+    resolution: int = 4
+    """Number of cells along each axis. Total tets = resolution^3 * 5."""
+
+
+@configclass
 class MeshFromFileCfg(MeshCfg):
     """Configuration parameters for spawning a mesh prim from a USD file.
 

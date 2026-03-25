@@ -29,8 +29,10 @@ class DropClothEnv(DirectRLEnv):
         super().__init__(cfg, render_mode, **kwargs)
 
     def _setup_scene(self):
-        # Cloth asset — registers MODEL_INIT / PHYSICS_READY callbacks internally
+        # Cloth asset (triangle surface mesh)
         self.cloth = DeformableObject(self.cfg.cloth)
+        # Soft cuboid (volumetric tet mesh from PhysX tetrahedralization)
+        self.cube = DeformableObject(self.cfg.cube)
 
         # Ground plane
         spawn_ground_plane(prim_path="/World/ground", cfg=GroundPlaneCfg())
@@ -51,6 +53,7 @@ class DropClothEnv(DirectRLEnv):
 
     def _get_observations(self) -> dict:
         self.cloth.update(self.step_dt)
+        self.cube.update(self.step_dt)
         return {"policy": torch.zeros(self.num_envs, 1, device=self.device)}
 
     def _get_rewards(self) -> torch.Tensor:
@@ -66,3 +69,4 @@ class DropClothEnv(DirectRLEnv):
             return
         super()._reset_idx(env_ids)
         self.cloth.reset(env_ids=env_ids)
+        self.cube.reset(env_ids=env_ids)

@@ -257,6 +257,114 @@ def spawn_mesh_cone(
 
 
 @clone
+def spawn_tet_mesh_cuboid(
+    prim_path: str,
+    cfg: meshes_cfg.TetMeshCuboidCfg,
+    translation: tuple[float, float, float] | None = None,
+    orientation: tuple[float, float, float, float] | None = None,
+    **kwargs,
+) -> Usd.Prim:
+    """Create a cuboid mesh prim with tetrahedral volumetric data.
+
+    Generates a regular hexahedral grid and decomposes each hex cell into 5 tetrahedra
+    (matching Newton's ``add_soft_grid`` convention). The surface triangles are written as
+    ``UsdGeom.Mesh`` geometry for rendering, and the tet indices are stored as a custom
+    ``int[]`` attribute ``newton:tetIndices`` (4 ints per tet, flattened) on the mesh prim.
+
+    .. note::
+        This function is decorated with :func:`clone` that resolves prim path into list of paths
+        if the input prim path is a regex pattern.
+
+    Args:
+        prim_path: The prim path or pattern to spawn the asset at.
+        cfg: The configuration instance.
+        translation: The translation to apply to the prim w.r.t. its parent prim. Defaults to None.
+        orientation: The orientation in (x, y, z, w) to apply to the prim w.r.t. its parent prim. Defaults to None.
+        **kwargs: Additional keyword arguments, like ``clone_in_fabric``.
+
+    Returns:
+        The created prim.
+
+    Raises:
+        ValueError: If a prim already exists at the given path.
+    """
+    sx, sy, sz = cfg.size
+    n = cfg.resolution
+
+    cell_x, cell_y, cell_z = sx / n, sy / n, sz / n
+    # Center the grid at origin
+    ox, oy, oz = -sx / 2, -sy / 2, -sz / 2
+
+    # Generate vertices on regular grid
+    vertices = []
+    for iz in range(n + 1):
+        for iy in range(n + 1):
+            for ix in range(n + 1):
+                vertices.append([ox + ix * cell_x, oy + iy * cell_y, oz + iz * cell_z])
+    vertices = np.array(vertices, dtype=np.float32)
+
+    def grid_index(x, y, z):
+        return (n + 1) * (n + 1) * z + (n + 1) * y + x
+
+    # Decompose each hex cell into 5 tets and collect surface faces
+    tet_indices = []
+    faces = {}  # open-face tracking for surface extraction
+
+    def add_face(i, j, k):
+        key = tuple(sorted((i, j, k)))
+        if key not in faces:
+            faces[key] = (i, j, k)
+        else:
+            del faces[key]
+
+    for iz in range(n):
+        for iy in range(n):
+            for ix in range(n):
+                v0 = grid_index(ix, iy, iz)
+                v1 = grid_index(ix + 1, iy, iz)
+                v2 = grid_index(ix + 1, iy, iz + 1)
+                v3 = grid_index(ix, iy, iz + 1)
+                v4 = grid_index(ix, iy + 1, iz)
+                v5 = grid_index(ix + 1, iy + 1, iz)
+                v6 = grid_index(ix + 1, iy + 1, iz + 1)
+                v7 = grid_index(ix, iy + 1, iz + 1)
+
+                if (ix & 1) ^ (iy & 1) ^ (iz & 1):
+                    tets = [(v0, v1, v4, v3), (v2, v3, v6, v1), (v5, v4, v1, v6), (v7, v6, v3, v4), (v4, v1, v6, v3)]
+                else:
+                    tets = [(v1, v2, v5, v0), (v3, v0, v7, v2), (v4, v7, v0, v5), (v6, v5, v2, v7), (v5, v2, v7, v0)]
+
+                for i, j, k, l in tets:
+                    tet_indices.extend([i, j, k, l])
+                    add_face(i, k, j)
+                    add_face(j, k, l)
+                    add_face(i, j, l)
+                    add_face(i, l, k)
+
+    # Surface triangles from open faces
+    surface_faces = np.array(list(faces.values()), dtype=np.int32)
+
+    # Create a trimesh from the surface for the USD prim
+    mesh = trimesh.Trimesh(vertices=vertices, faces=surface_faces, process=False)
+
+    # Obtain stage handle
+    stage = get_current_stage()
+    # Spawn the surface mesh as UsdGeom.Mesh
+    _spawn_mesh_geom_from_mesh(prim_path, cfg, mesh, translation, orientation, stage=stage)
+
+    # Store tet indices as a custom attribute on the mesh prim
+    from pxr import Sdf, Vt
+
+    mesh_prim_path = prim_path + "/geometry/mesh"
+    mesh_prim = stage.GetPrimAtPath(mesh_prim_path)
+    if mesh_prim.IsValid():
+        tet_attr = mesh_prim.CreateAttribute("newton:tetIndices", Sdf.ValueTypeNames.IntArray, True)
+        tet_attr.Set(Vt.IntArray(tet_indices))
+
+    return stage.GetPrimAtPath(prim_path)
+
+
+@clone
 def spawn_mesh_from_file(
     prim_path: str,
     cfg: meshes_cfg.MeshFromFileCfg,
