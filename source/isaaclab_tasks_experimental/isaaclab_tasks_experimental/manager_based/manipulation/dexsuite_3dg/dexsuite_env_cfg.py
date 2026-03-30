@@ -72,6 +72,40 @@ class ObjectCfg(PresetCfg):
         collision_props=sim_utils.CollisionPropertiesCfg(),
         mass_props=sim_utils.MassPropertiesCfg(mass=0.2),
     )
+
+    # Newton/MuJoCo requires homogeneous worlds — all envs must use the same
+    # collision shape type.  The mixed ``shapes`` preset (cuboids + spheres +
+    # capsules + cones) triggers:
+    #   "SolverMuJoCo requires homogeneous worlds. Shape types mismatch …"
+    # Use this preset instead when running with Newton (env.scene.object=shapes_newton).
+    # Only cuboids are used so shape type 7 (box) is consistent across all worlds.
+    shapes_newton = sim_utils.MultiAssetSpawnerCfg(
+        assets_cfg=[
+            CuboidCfg(size=(0.05, 0.1, 0.1), physics_material=RigidBodyMaterialCfg(static_friction=0.5)),
+            CuboidCfg(size=(0.05, 0.05, 0.1), physics_material=RigidBodyMaterialCfg(static_friction=0.5)),
+            CuboidCfg(size=(0.025, 0.1, 0.1), physics_material=RigidBodyMaterialCfg(static_friction=0.5)),
+            CuboidCfg(size=(0.025, 0.05, 0.1), physics_material=RigidBodyMaterialCfg(static_friction=0.5)),
+            CuboidCfg(size=(0.025, 0.025, 0.1), physics_material=RigidBodyMaterialCfg(static_friction=0.5)),
+            CuboidCfg(size=(0.01, 0.1, 0.1), physics_material=RigidBodyMaterialCfg(static_friction=0.5)),
+            CuboidCfg(size=(0.1, 0.05, 0.05), physics_material=RigidBodyMaterialCfg(static_friction=0.5)),
+            CuboidCfg(size=(0.1, 0.1, 0.05), physics_material=RigidBodyMaterialCfg(static_friction=0.5)),
+            CuboidCfg(size=(0.05, 0.025, 0.1), physics_material=RigidBodyMaterialCfg(static_friction=0.5)),
+            CuboidCfg(size=(0.1, 0.025, 0.05), physics_material=RigidBodyMaterialCfg(static_friction=0.5)),
+            CuboidCfg(size=(0.05, 0.05, 0.05), physics_material=RigidBodyMaterialCfg(static_friction=0.5)),
+            CuboidCfg(size=(0.075, 0.05, 0.1), physics_material=RigidBodyMaterialCfg(static_friction=0.5)),
+            CuboidCfg(size=(0.075, 0.075, 0.1), physics_material=RigidBodyMaterialCfg(static_friction=0.5)),
+            CuboidCfg(size=(0.025, 0.025, 0.05), physics_material=RigidBodyMaterialCfg(static_friction=0.5)),
+            CuboidCfg(size=(0.05, 0.1, 0.05), physics_material=RigidBodyMaterialCfg(static_friction=0.5)),
+            CuboidCfg(size=(0.025, 0.1, 0.05), physics_material=RigidBodyMaterialCfg(static_friction=0.5)),
+        ],
+        rigid_props=sim_utils.RigidBodyPropertiesCfg(
+            solver_position_iteration_count=16,
+            solver_velocity_iteration_count=0,
+            disable_gravity=False,
+        ),
+        collision_props=sim_utils.CollisionPropertiesCfg(),
+        mass_props=sim_utils.MassPropertiesCfg(mass=0.2),
+    )
     cube = sim_utils.CuboidCfg(
         # TODO : reset to initial value (0.05,0.1,0.1)
         size=(0.1, 0.1, 0.1),
@@ -83,6 +117,22 @@ class ObjectCfg(PresetCfg):
         ),
         collision_props=sim_utils.CollisionPropertiesCfg(),
         mass_props=sim_utils.MassPropertiesCfg(mass=0.2),
+    )
+    # Cube with physics matched to Simplicits deployment:
+    #   mass  = density × volume = 2500 kg/m³ × (0.1 m)³ = 2.5 kg
+    #   friction = SimplicitsObjectCfg.contact_particle_mu = 1.0
+    # Contact stiffness (ke=500 N/m) is applied in Newton via the
+    # ``simplicits_matched`` physics preset (Dexsuite3dgNewtonCfg.object_contact_ke).
+    simplicits_matched = sim_utils.CuboidCfg(
+        size=(0.1, 0.1, 0.1),
+        physics_material=RigidBodyMaterialCfg(static_friction=1.0),
+        rigid_props=sim_utils.RigidBodyPropertiesCfg(
+            solver_position_iteration_count=16,
+            solver_velocity_iteration_count=0,
+            disable_gravity=False,
+        ),
+        collision_props=sim_utils.CollisionPropertiesCfg(),
+        mass_props=sim_utils.MassPropertiesCfg(mass=2.5),
     )
     default = shapes
 

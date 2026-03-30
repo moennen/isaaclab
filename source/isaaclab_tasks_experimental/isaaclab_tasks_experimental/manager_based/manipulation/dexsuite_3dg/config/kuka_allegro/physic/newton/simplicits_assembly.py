@@ -27,6 +27,7 @@ from .dexsuite_3dg_builder_utils import build_rigid_proto_excluding_object
 
 logger = logging.getLogger("dexsuite_3dg.simplicits.assembly")
 
+
 try:
     from kaolin.experimental.newton.builder import SimplicitsModelBuilder
     from kaolin.experimental.newton.collisions import SimplicitsParticleNewtonShapeSoftContact
@@ -118,7 +119,9 @@ def build_multi_env_simplicits_model(
 
     # Build Simplicits scene (all objects) first so we have sim_pts; then build Newton with
     # one world per env: rigid proto + that env's particle slice, so particles get correct world ID.
-    smb = _MultiWorldSimplicitsModelBuilder(up_axis=axis, gravity=-float(gravity), simplicits_cfg=simplicits_cfg)
+    smb = _MultiWorldSimplicitsModelBuilder(
+        up_axis=axis, gravity=-float(gravity), simplicits_cfg=simplicits_cfg
+    )
 
     # Phase 1: add all Simplicits objects to the scene (no Newton worlds yet)
     for i, env_path in enumerate(env_paths):
@@ -272,6 +275,7 @@ class _MultiWorldSimplicitsModelBuilder:
                 mass=mass_list,
                 radius=[particle_radius] * len(pos_list),
             )
+
             self._base.end_world()
         self._simplicits_particle_end = len(self._base.particle_q)
 

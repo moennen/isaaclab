@@ -11,9 +11,11 @@ contact mechanics, and solver settings — so every physics knob is in one place
 Quick tuning guide
 ------------------
 Fingers penetrate the object:
-    Raise ``soft_contact_coeff`` (e.g. 0.5 → 2.0) or ``soft_contact_ke`` (e.g. 1e4 → 3e4).
+    Raise ``soft_contact_coeff`` (e.g. 0.05 → 0.5) or ``soft_contact_ke`` (e.g. 1e4 → 3e4).
+    ``soft_contact_coeff`` scales both the particle deformation response and the Newton's
+    3rd-law reaction force returned to the robot fingers, so it is the primary tuning knob.
 
-Robot backs off violently on first touch:
+Robot backs off too fast on first touch:
     Lower ``soft_contact_coeff`` (e.g. 0.5 → 0.1).
     Alternatively, increase ``num_substeps`` in the env config to reduce per-substep dt.
 
@@ -43,8 +45,10 @@ class SimplicitsObjectCfg:
     * **Sampling** (``num_samples``, ``collision_particle_radius``): determine particle
       density and contact detection geometry.
     * **Contact mechanics** (``soft_contact_ke``, ``soft_contact_coeff``,
-      ``contact_detection_ratio``): control the strength and reach of soft–rigid contact forces
-      and the Newton's 3rd-law reaction transferred back to the robot.
+      ``contact_detection_ratio``, ``contact_particle_mu``): control the strength and
+      reach of contact forces. ``soft_contact_ke`` and ``soft_contact_coeff`` govern the
+      bidirectional soft-penalty coupling: they set both how much particles resist
+      penetration and how much reaction force is returned to the robot rigid bodies.
     * **Solver** (``newton_conv_tol``): convergence criterion for the inner Newton-Raphson loop
       of the Simplicits implicit integrator.
     """
@@ -53,14 +57,14 @@ class SimplicitsObjectCfg:
     # Material
     # ------------------------------------------------------------------
 
-    density: float = 500.0
+    density: float = 2500.0
     """Density [kg/m³] applied to all sampled particles.
 
     Governs object mass (mass = density × appx_vol). Typical values:
     wood ~600, foam ~100–300, rubber ~1200.
     """
 
-    youngs_modulus: float = 1e5
+    youngs_modulus: float = 1e7
     """Young's modulus [Pa] for elastic stiffness.
 
     Controls resistance to deformation. With one rigid handle the object deforms
@@ -69,7 +73,7 @@ class SimplicitsObjectCfg:
     Soft foam: 1e3–1e4 Pa · Rubber: 1e6–1e7 Pa · Rigid-like: ≥ 1e8 Pa.
     """
 
-    poisson_ratio: float = 0.45
+    poisson_ratio: float = 0.47
     """Poisson ratio (dimensionless, 0 < ν < 0.5).
 
     Near-incompressible materials (foam, rubber): 0.4–0.49.
@@ -88,7 +92,7 @@ class SimplicitsObjectCfg:
     Typical range: 500 (fast, coarse) – 5000 (accurate, slow).
     """
 
-    collision_particle_radius: float | None = None
+    collision_particle_radius: float | None = 0.01
     """Radius [m] for each collision particle (scene-wide).
 
     Used as both the per-particle sphere radius and the base for contact
@@ -114,7 +118,7 @@ class SimplicitsObjectCfg:
     reserve ``soft_contact_ke`` for order-of-magnitude changes.
     """
 
-    soft_contact_coeff: float = 0.5
+    soft_contact_coeff: float = 0.05
     """Gradient scale for soft–rigid contact energy (dimensionless).
 
     Multiplies *both* the Simplicits energy gradient (how much the soft body
@@ -125,6 +129,14 @@ class SimplicitsObjectCfg:
 
     * Fingers still penetrate → raise (e.g. 0.5 → 2.0).
     * Robot backs off too fast on first touch → lower (e.g. 0.5 → 0.1).
+    """
+
+    contact_particle_mu: float = 1.0
+    """Coulomb friction coefficient for particle–shape contacts [dimensionless].
+
+    Controls how much tangential (friction) force the finger–particle contacts can sustain
+    before slipping. Higher values allow a stronger grip.
+    Typical range: 0.5 (slippery) – 2.0 (high-friction rubber).
     """
 
     contact_detection_ratio: float = 1.5

@@ -17,6 +17,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any
 
+import numpy as np
 import torch
 import warp as wp
 from isaaclab_newton.physics import NewtonManager
@@ -215,10 +216,23 @@ class Dexsuite3dgNewtonManager(NewtonManager):
 
     @classmethod
     def initialize_solver(cls) -> None:
-        """Initialize solver. When simplicits enabled, add SimplicitsSolver after base solver."""
+        """Initialize solver. When simplicits enabled, add SimplicitsSolver."""
         super().initialize_solver()
-        if _simplicits_enabled() and cls._model is not None and SimplicitsSolver is not None:
-            cls._simplicits_solver = SimplicitsSolver(cls._model)
+
+        # Apply Simplicits-matched contact stiffness to the Object body in rigid mode.
+        # This lets training reproduce Simplicits' effective soft-contact dynamics so that a
+        # policy trained with rigid physics transfers to Simplicits deployment without mismatch.
+        if cls._model is not None:
+            newton_cfg = PhysicsManager._cfg
+            ke_override = getattr(newton_cfg, "object_contact_ke", None)
+            kd_override = getattr(newton_cfg, "object_contact_kd", None)
+            if ke_override is not None and kd_override is not None:
+                cls._apply_object_contact_override(float(ke_override), float(kd_override))
+
+        if not (_simplicits_enabled() and cls._model is not None and SimplicitsSolver is not None):
+            return
+        cls._simplicits_solver = SimplicitsSolver(cls._model)
+        logger.warning("[DexSuite 3DG] SimplicitsSolver initialized — soft-penalty bidirectional coupling active.")
 
     @classmethod
     def _simulate(cls) -> None:
@@ -230,31 +244,21 @@ class Dexsuite3dgNewtonManager(NewtonManager):
 
     @classmethod
     def _simulate_two_phase(cls) -> None:
-        """Run one simulation step in two phases: rigid pipeline, then Simplicits pipeline, then state update.
+        """Run one simulation step with interlaced rigid and Simplicits substeps.
 
-        Pipeline overview:
+        Each substep:
+          1. Rigid step (MuJoCo LCP) — robot and all other rigid bodies advance.
+          2. clear_forces() — reset body force accumulators.
+          3. Simplicits step — particle cloud advances using robot body positions for
+             contact detection; soft-penalty forces are integrated into the implicit solve.
+          4. accumulate_reaction_on_bodies() — Newton's 3rd law: writes equal-and-opposite
+             contact reaction wrenches into body_f so the robot feels resistance from the
+             deformable object on the next rigid step (one-substep delay, ~2 ms at 4 substeps).
 
-        1. **Standard Newton (rigid/articulation)** — same as base :meth:`NewtonManager._simulate`:
-           - **Collision:** Compute rigid–rigid (and rigid–articulation) contacts via
-             :attr:`_collision_pipeline.collide` into :attr:`_contacts` (used only for the rigid step).
-           - **Steps:** Run :attr:`_solver.step` for each substep (e.g. MuJoCo), advancing
-             :attr:`_state_0` body and articulation DOFs only. Particles in :attr:`_state_0` are
-             not modified by the rigid solver.
-
-        2. **Simplicits pipeline:**
-           - **Collision:** Call :attr:`_model.collide` on :attr:`_state_0` to compute contacts
-             that include rigid–particle (soft–rigid) and particle–particle. Input state has rigid
-             bodies already updated from phase 1 and particle positions from the previous step.
-           - **Steps:** Run :meth:`SimplicitsSolver.step` to advance Simplicits particle state
-             (e.g. from :attr:`_state_0` to :attr:`_state_1`).
-
-        3. **State update:** Copy the result of the Simplicits step back into :attr:`_state_0`
-           (:meth:`State.assign`) and clear forces so the next frame sees the combined rigid + particle state.
-
-        After that, contact sensors are updated (from rigid contacts) and transforms are synced to USD
-        when needed.
+        This gives fully bidirectional coupling:
+          robot → Simplicits : body positions drive particle contact detection (step 3).
+          Simplicits → robot : reaction forces land in body_f, consumed by next step 1.
         """
-        # Phase 1: rigid step (same as base)
         if cls._needs_collision_pipeline:
             cls._collision_pipeline.collide(cls._state_0, cls._contacts)
             contacts_rigid = cls._contacts
@@ -264,10 +268,54 @@ class Dexsuite3dgNewtonManager(NewtonManager):
         def step_fn(state_0, state_1):
             cls._solver.step(state_0, state_1, cls._control, contacts_rigid, cls._solver_dt)
 
+        # Resolve the soft-contact reaction handler once outside the substep loop.
+        _contact_handler = None
+        _contact_coeff = 1.0
+        _soft_collisions = cls._model.simplicits_scene.force_dict.get("pt_wise", {}).get(
+            "newton_soft_collisions"
+        )
+        if _soft_collisions is not None:
+            _ch = _soft_collisions.get("object")
+            if _ch is not None and hasattr(_ch, "accumulate_reaction_on_bodies"):
+                _contact_handler = _ch
+                _contact_coeff = float(_soft_collisions.get("coeff", 1.0))
+
+        _s_start = cls._model.simplicits_particle_start
+        _s_end = cls._model.simplicits_particle_end
+
+        def _simplicits_substep() -> None:
+            # SimplicitsSolver reads sim_z/sim_z_dot from state_0, writes Simplicits
+            # fields into state_1. Rigid fields in state_1 are stale, so copy only the
+            # four Simplicits fields back to state_0.
+            with wp.ScopedDevice(PhysicsManager._device):
+                contacts = cls._model.collide(cls._state_0)
+                cls._simplicits_solver.step(cls._state_0, cls._state_1, cls._control, contacts, cls._solver_dt)
+                wp.copy(cls._state_0.sim_z, cls._state_1.sim_z)
+                wp.copy(cls._state_0.sim_z_dot, cls._state_1.sim_z_dot)
+                wp.copy(
+                    dest=cls._state_0.particle_q,
+                    src=cls._state_1.particle_q,
+                    dest_offset=_s_start,
+                    src_offset=_s_start,
+                    count=_s_end - _s_start,
+                )
+                wp.copy(
+                    dest=cls._state_0.particle_qd,
+                    src=cls._state_1.particle_qd,
+                    dest_offset=_s_start,
+                    src_offset=_s_start,
+                    count=_s_end - _s_start,
+                )
+            # Always accumulate soft-penalty reaction forces onto rigid bodies so the robot
+            # feels resistance from the Simplicits object on the next rigid step.
+            if _contact_handler is not None:
+                _contact_handler.accumulate_reaction_on_bodies(_contact_coeff)
+
         if cls._use_single_state:
             for _ in range(cls._num_substeps):
                 step_fn(cls._state_0, cls._state_0)
                 cls._state_0.clear_forces()
+                _simplicits_substep()
         else:
             cfg = PhysicsManager._cfg
             need_copy = cfg is not None and getattr(cfg, "use_cuda_graph", False) and cls._num_substeps % 2 == 1
@@ -278,59 +326,7 @@ class Dexsuite3dgNewtonManager(NewtonManager):
                 else:
                     cls._state_0, cls._state_1 = cls._state_1, cls._state_0
                 cls._state_0.clear_forces()
-
-        # Phase 2: collide (rigid + Simplicits particles) then SimplicitsSolver
-        #
-        # State layout entering phase 2:
-        #   state_0 — fully up-to-date: rigid fields (joint_q, body_q, joint_qd, …)
-        #             advanced by phase 1; Simplicits fields (sim_z, particle_q, …)
-        #             still hold values from the *previous* frame.
-        #   state_1 — untouched since model.state() initialisation: rigid fields
-        #             are at their initial values; Simplicits fields are stale.
-        #
-        # SimplicitsSolver.step(state_0 → state_1) reads sim_z / sim_z_dot from
-        # state_0, runs one Simplicits Newton step, then writes the four updated
-        # Simplicits fields into state_1:
-        #   state_1.sim_z, state_1.sim_z_dot          (reduced DOFs + velocities)
-        #   state_1.particle_q, state_1.particle_qd   (world-space positions / vel)
-        # Rigid fields in state_1 are NOT written by the Simplicits solver and
-        # therefore remain at their stale initial values.
-        #
-        # After the step we must NOT use state_0.assign(state_1) — that would copy
-        # the stale rigid fields from state_1 back onto the correctly-advanced
-        # state_0.  Instead we copy only the four Simplicits fields (see below).
-        with wp.ScopedDevice(PhysicsManager._device):
-            contacts = cls._model.collide(cls._state_0)
-            cls._simplicits_solver.step(
-                cls._state_0,
-                cls._state_1,
-                cls._control,
-                contacts,
-                cls._solver_dt,
-            )
-            # Copy only the Simplicits-updated fields from state_1 back to state_0.
-            # Using state_0.assign(state_1) would overwrite rigid body fields (joint_q,
-            # body_q, etc.) with stale initial values since state_1 is never updated by
-            # the rigid solver step.
-            wp.copy(cls._state_0.sim_z, cls._state_1.sim_z)
-            wp.copy(cls._state_0.sim_z_dot, cls._state_1.sim_z_dot)
-            _s_start = cls._model.simplicits_particle_start
-            _s_end = cls._model.simplicits_particle_end
-            wp.copy(
-                dest=cls._state_0.particle_q,
-                src=cls._state_1.particle_q,
-                dest_offset=_s_start,
-                src_offset=_s_start,
-                count=_s_end - _s_start,
-            )
-            wp.copy(
-                dest=cls._state_0.particle_qd,
-                src=cls._state_1.particle_qd,
-                dest_offset=_s_start,
-                src_offset=_s_start,
-                count=_s_end - _s_start,
-            )
-            cls._state_0.clear_forces()
+                _simplicits_substep()
 
         if cls._report_contacts:
             eval_contacts = contacts_rigid if contacts_rigid is not None else cls._contacts
@@ -341,6 +337,56 @@ class Dexsuite3dgNewtonManager(NewtonManager):
 
         if cls._usdrt_stage is not None:
             cls.sync_transforms_to_usd()
+
+    @classmethod
+    def _apply_object_contact_override(cls, ke: float, kd: float) -> None:
+        """Override contact ke/kd for every shape that belongs to the Object body.
+
+        Newton reads contact ke/kd from USD at build time (or from ``default_shape_cfg``).
+        Calling this after ``initialize_solver`` lets us set Simplicits-matched soft-contact
+        parameters (ke ≈ 500 N/m, kd ≈ 45 N·s/m) on the rigid training cube without touching
+        the robot or table contacts.
+
+        Looks up bodies whose USD-path label ends with ``/Object`` (case-sensitive) and patches
+        ``model.shape_material_ke`` / ``model.shape_material_kd`` in-place.
+
+        Args:
+            ke: Contact elastic stiffness [N/m].
+            kd: Contact damping [N·s/m].
+        """
+        model = cls._model
+        body_labels: list[str] = model.body_label  # list of USD prim paths
+        object_body_ids: set[int] = set()
+        for i, label in enumerate(body_labels):
+            # Label is a USD path like /World/envs/env_0/Object; match the last segment.
+            if label.split("/")[-1] == "Object":
+                object_body_ids.add(i)
+        if not object_body_ids:
+            logger.warning(
+                "[DexSuite 3DG] object_contact_ke/kd override: no body with last-segment "
+                "label 'Object' found in model.body_label — override skipped."
+            )
+            return
+        shape_body_np = model.shape_body.numpy()
+        ke_np = model.shape_material_ke.numpy().copy()
+        kd_np = model.shape_material_kd.numpy().copy()
+        count = 0
+        for shape_idx, body_idx in enumerate(shape_body_np):
+            if int(body_idx) in object_body_ids:
+                ke_np[shape_idx] = ke
+                kd_np[shape_idx] = kd
+                count += 1
+        model.shape_material_ke = wp.array(
+            ke_np, dtype=model.shape_material_ke.dtype, device=model.shape_material_ke.device
+        )
+        model.shape_material_kd = wp.array(
+            kd_np, dtype=model.shape_material_kd.dtype, device=model.shape_material_kd.device
+        )
+        logger.warning(
+            "[DexSuite 3DG] Object contact override applied: ke=%.1f N/m  kd=%.1f N·s/m  "
+            "shapes patched=%d  body_ids=%s",
+            ke, kd, count, sorted(object_body_ids),
+        )
 
     @classmethod
     def get_simplicits_object_pose(cls) -> tuple[wp.array, wp.array] | None:

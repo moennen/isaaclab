@@ -38,7 +38,9 @@ So you must make the name `NewtonManager` in `isaaclab_newton.physics` refer to 
 ## File layout (skeleton)
 
 - `.../config/kuka_allegro/physic/newton/dexsuite_3dg_newton_manager.py`
-  - `Dexsuite3dgNewtonManager(NewtonManager)` with overrides (e.g. `step`, `reset`, or `_simulate`).
+  - `Dexsuite3dgNewtonManager(NewtonManager)` with overrides (e.g. `step`, `_simulate` for a
+  two-phase rigid-then-Simplicits step, and `apply_simplicits_root_pose_reset` so MDP object
+  resets retarget the particle cloud to the sampled world pose).
 - `.../config/kuka_allegro/physic/newton/dexsuite_3dg_newton_cfg.py`
   - `Dexsuite3dgNewtonCfg(NewtonCfg)` with `class_type = "{DIR}.dexsuite_3dg_newton_manager:Dexsuite3dgNewtonManager"`.
 - `.../config/kuka_allegro/dexsuite_kuka_allegro_env_cfg.py`
