@@ -26,7 +26,16 @@ setup(
     keywords=EXTENSION_TOML_DATA["package"]["keywords"],
     include_package_data=True,
     python_requires=">=3.10",
-    install_requires=["isaaclab_tasks"],
+    install_requires=[
+        "isaaclab_tasks",
+        "numpy>2",
+        "torch>=2.7",
+        "torchvision>=0.14.1",
+        "protobuf>=3.20.2,!=5.26.0",
+        "tensorboard",
+        "scikit-learn",
+        "numba",
+    ],
     packages=find_packages(),
     classifiers=[
         "Natural Language :: English",

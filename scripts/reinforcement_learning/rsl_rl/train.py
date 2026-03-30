@@ -60,6 +60,13 @@ parser.add_argument(
 parser.add_argument("--seed", type=int, default=None, help="Seed used for the environment")
 parser.add_argument("--max_iterations", type=int, default=None, help="RL Policy training iterations.")
 parser.add_argument(
+    "--load_weights_only",
+    action="store_true",
+    default=False,
+    help="When resuming, load only actor/critic weights — skip optimizer state and iteration counter."
+    " Useful for fine-tuning on a new environment without inheriting the old adaptive LR state.",
+)
+parser.add_argument(
     "--distributed", action="store_true", default=False, help="Run training with multiple GPUs or nodes."
 )
 parser.add_argument("--export_io_descriptors", action="store_true", default=False, help="Export IO descriptors.")
@@ -195,7 +202,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         if agent_cfg.resume or agent_cfg.algorithm.class_name == "Distillation":
             print(f"[INFO]: Loading model checkpoint from: {resume_path}")
             # load previously trained model
-            runner.load(resume_path)
+            if args_cli.load_weights_only:
+                print("[INFO]: --load_weights_only: loading actor/critic weights only (optimizer state and iteration counter reset).")
+                load_cfg = {"actor": True, "critic": True, "optimizer": False, "iteration": False, "rnd": True}
+                runner.load(resume_path, load_cfg=load_cfg)
+            else:
+                runner.load(resume_path)
 
         # dump the configuration into log-directory
         dump_yaml(os.path.join(log_dir, "params", "env.yaml"), env_cfg)

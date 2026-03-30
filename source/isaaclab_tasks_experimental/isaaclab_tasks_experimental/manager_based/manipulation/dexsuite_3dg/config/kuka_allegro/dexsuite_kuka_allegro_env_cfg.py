@@ -5,7 +5,7 @@
 
 from isaaclab_physx.physics import PhysxCfg
 
-from isaaclab.assets import ArticulationCfg
+from isaaclab.assets import ArticulationCfg, RigidObjectCfg
 from isaaclab.managers import RewardTermCfg as RewTerm
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.sensors import ContactSensorCfg, TiledCameraCfg
@@ -51,6 +51,24 @@ class KukaAllegroPhysicsCfg(PresetCfg):
 
     - **CUDA graph:** Off so the two-phase step (rigid then Simplicits) runs every tick.
     """
+
+    simplicits_matched = Dexsuite3dgNewtonCfg(
+        object_contact_ke=500.0,
+        object_contact_kd=45.0,
+    )
+    """Rigid Newton with Object contact stiffness matched to Simplicits soft-penalty physics.
+
+    Use this preset to retrain a policy that transfers to Simplicits deployment without
+    contact-stiffness mismatch.
+
+    The values replicate the Simplicits effective contact spring seen by the robot::
+
+        ke_eff = soft_contact_ke × soft_contact_coeff = 1e4 × 0.05 = 500 N/m
+        kd_eff = 2 × sqrt(ke_eff) ≈ 45 N·s/m   (critical damping; timeconst ≈ 0.044 s > 2 × dt)
+
+    Also update the scene to match Simplicits object mass and friction:
+    ``env.scene=simplicits_matched  env.sim.physics=simplicits_matched``
+    """
     physx = PhysxCfg(
         bounce_threshold_velocity=0.01,
         gpu_max_rigid_patch_count=4 * 5 * 2**15,
@@ -71,6 +89,17 @@ class KukaAllegroSceneCfg(PresetCfg):
         base_camera: TiledCameraCfg | None = None
 
         wrist_camera: TiledCameraCfg | None = None
+
+        # Override object to use cuboid-only MultiAsset so Newton/MuJoCo worlds are
+        # homogeneous (all shape type 7 = box). The parent dexsuite.SceneCfg default
+        # uses ``ObjectCfg().shapes`` which mixes cuboids, spheres, capsules, and cones —
+        # different Newton shape type codes — causing:
+        #   "SolverMuJoCo requires homogeneous worlds. Shape types mismatch …"
+        object: RigidObjectCfg = RigidObjectCfg(
+            prim_path="{ENV_REGEX_NS}/Object",
+            spawn=dexsuite.ObjectCfg().shapes_newton,
+            init_state=RigidObjectCfg.InitialStateCfg(pos=(-0.55, 0.0, 0.555)),
+        )
 
         def __post_init__(self: dexsuite.SceneCfg):
             super().__post_init__()
@@ -95,6 +124,11 @@ class KukaAllegroSceneCfg(PresetCfg):
             init_state=default.object.init_state,
             class_type=SimplicitsObjectAdapter,
         )
+    )
+    # Rigid cube with mass/friction matched to Simplicits for retraining.
+    # Pair with env.sim.physics=simplicits_matched to also set ke=500 N/m contact stiffness.
+    simplicits_matched = default.replace(
+        object=default.object.replace(spawn=dexsuite.ObjectCfg().simplicits_matched)
     )
 
 

@@ -27,6 +27,29 @@ class Dexsuite3dgNewtonCfg(NewtonCfg):
     simplicits_cfg: SimplicitsObjectCfg | None = None
     """Simplicits material/sampling/collision config. Used only when simplicits_enabled is True."""
 
+    object_contact_ke: float | None = None
+    """Override contact elastic stiffness [N/m] for the Object body's shapes (rigid mode only).
+
+    When set, replaces Newton's default ``shape_material_ke`` for every shape that belongs to
+    the prim named ``Object`` in the scene.  Use this to match the Simplicits soft-contact
+    effective stiffness when retraining a policy for Simplicits deployment:
+
+    .. code-block:: text
+
+        ke_simplicits = soft_contact_ke × soft_contact_coeff   (e.g. 1e4 × 0.05 = 500 N/m)
+
+    At ke=500 a 16 N finger force causes ~32 mm of penetration — comparable to Simplicits
+    soft contacts.  Leave ``None`` to keep Newton's built-in defaults.
+    """
+
+    object_contact_kd: float | None = None
+    """Override contact damping [N·s/m] for the Object body's shapes (rigid mode only).
+
+    Paired with :attr:`object_contact_ke`.  For ke=500 critical damping is
+    ``kd = 2 * sqrt(500) ≈ 45 N·s/m`` (``timeconst = 2/45 ≈ 0.044 s``, stable for
+    ``dt = 0.0083 s``).  Leave ``None`` to keep Newton's built-in defaults.
+    """
+
     solver_cfg: MJWarpSolverCfg = MJWarpSolverCfg(
         solver="newton",
         integrator="implicitfast",

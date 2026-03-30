@@ -102,3 +102,38 @@ class Dexsuite3dgKukaAllegroPPORunnerCfg(PresetCfg):
         critic=STATE_CRITIC_CFG,
         algorithm=ALGO_CFG.replace(num_mini_batches=16),
     )
+
+    finetune = Dexsuite3dgKukaAllegroPPOBaseRunnerCfg().replace(
+        experiment_name="dexsuite_3dg_kuka_allegro_finetune",
+        obs_groups={"actor": ["policy", "proprio", "perception"], "critic": ["policy", "proprio", "perception"]},
+        actor=STATE_POLICY_CFG,
+        critic=STATE_CRITIC_CFG,
+        # Adjusted for low env count (≤ 8 envs, episode = 360 steps at 60 Hz).
+        #
+        # With 8 envs, num_steps_per_env=360 gives 2880 samples per rollout — one
+        # full episode of diversity.  A single mini-batch avoids the instability of
+        # 64-sample batches that arise when num_mini_batches=4 at this scale.
+        # max_iterations=5000 yields ~14.4 M env steps, comparable to ~110 iterations
+        # of the 4096-env default training (same policy-update frequency).
+        num_steps_per_env=360,
+        max_iterations=5000,
+        algorithm=ALGO_CFG.replace(
+            num_mini_batches=1,
+            learning_rate=3e-4,
+        ),
+    )
+    """Fine-tuning preset for environments with very few parallel envs (≤ 8).
+
+    Use with ``--load_weights_only --resume`` to transfer a pre-trained policy to a
+    new contact regime (e.g. ``env.sim.physics=simplicits_matched``)::
+
+        ./isaaclab.sh -p scripts/reinforcement_learning/rsl_rl/train.py \\
+            --task Isaac-Dexsuite-3dg-Kuka-Allegro-Reorient-v0 \\
+            --num_envs 8 \\
+            --resume --load_weights_only \\
+            --load_run "2026-03-11_10-37-30" \\
+            --checkpoint "model_14999.pt" \\
+            env.sim.physics=simplicits_matched \\
+            env.scene=simplicits_matched \\
+            agent=finetune
+    """
