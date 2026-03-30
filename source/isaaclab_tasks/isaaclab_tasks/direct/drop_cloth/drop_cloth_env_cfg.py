@@ -70,7 +70,7 @@ class DropClothEnvCfg(DirectRLEnvCfg):
     # scene
     scene: InteractiveSceneCfg = InteractiveSceneCfg(
         num_envs=1,
-        env_spacing=2.0,  # envs are 2m apart
+        env_spacing=2.0,
         replicate_physics=False,
     )
 

@@ -16,7 +16,83 @@ from pxr import Usd, UsdGeom
 
 from isaaclab.physics.scene_data_requirements import VisualizerPrebuiltArtifacts
 
+import logging
+
 from isaaclab_newton.physics import NewtonManager
+
+logger = logging.getLogger(__name__)
+
+
+def add_deformable_entry_to_builder(
+    builder: ModelBuilder,
+    entry,
+    env_idx: int,
+    env_position: list[float],
+) -> None:
+    """Add a single deformable registry entry to the builder for one environment.
+
+    Args:
+        builder: The Newton model builder.
+        entry: A :class:`DeformableRegistryEntry` with mesh data and config.
+        env_idx: The environment index.
+        env_position: World position [x, y, z] for this environment.
+    """
+    before_count = getattr(builder, "particle_count", 0)
+
+    body_pos = wp.vec3(
+        entry.init_pos[0] + env_position[0],
+        entry.init_pos[1] + env_position[1],
+        entry.init_pos[2] + env_position[2],
+    )
+    body_rot = wp.quat(entry.init_rot[0], entry.init_rot[1], entry.init_rot[2], entry.init_rot[3])
+
+    if entry.is_tet:
+        builder.add_soft_mesh(
+            pos=body_pos,
+            rot=body_rot,
+            scale=1.0,
+            vel=wp.vec3(0.0, 0.0, 0.0),
+            vertices=entry.vertices,
+            indices=entry.indices,
+            density=entry.density,
+            k_mu=entry.k_mu,
+            k_lambda=entry.k_lambda,
+            k_damp=entry.k_damp,
+            particle_radius=entry.particle_radius,
+        )
+    else:
+        builder.add_cloth_mesh(
+            pos=body_pos,
+            rot=body_rot,
+            scale=1.0,
+            vel=wp.vec3(0.0, 0.0, 0.0),
+            vertices=entry.vertices,
+            indices=entry.indices,
+            density=entry.density,
+            tri_ke=entry.tri_ke,
+            tri_ka=entry.tri_ka,
+            tri_kd=entry.tri_kd,
+            edge_ke=entry.edge_ke,
+            edge_kd=entry.edge_kd,
+            particle_radius=entry.particle_radius,
+        )
+
+    after_count = getattr(builder, "particle_count", 0)
+    delta = after_count - before_count
+
+    entry.particle_offsets.append(before_count)
+    if env_idx == 0:
+        entry.particles_per_body = delta
+
+
+def _add_deformable_registry_entries_for_world(
+    builder: ModelBuilder,
+    world_idx: int,
+    env_position: list[float],
+) -> None:
+    """Add all deformable bodies from the registry into the current world context."""
+    for entry in NewtonManager._deformable_registry:
+        add_deformable_entry_to_builder(builder, entry, world_idx, env_position)
 
 
 def _build_newton_builder_from_mapping(
@@ -89,8 +165,17 @@ def _build_newton_builder_from_mapping(
                 protos[sources[row]],
                 xform=wp.transform(delta_pos, quaternions[col].tolist()),
             )
+
+        # Add deformable bodies from the registry into this world.
+        # This ensures particles get the correct world index for env isolation.
+        _add_deformable_registry_entries_for_world(builder, col, positions[col].tolist())
+
         # end the world context
         builder.end_world()
+
+    # Call builder.color() if any deformable entries were added (required by VBD solver)
+    if NewtonManager._deformable_registry:
+        builder.color()
 
     return builder, stage_info
 

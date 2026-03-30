@@ -97,6 +97,10 @@ class NewtonManager(PhysicsManager):
     # Views list for assets to register their views
     _views: list = []
 
+    # Deformable body registry — DeformableObject instances register here before clone_environments.
+    # newton_physics_replicate consumes this inside begin_world/end_world for proper world assignment.
+    _deformable_registry: list = []
+
     @classmethod
     def initialize(cls, sim_context: SimulationContext) -> None:
         """Initialize the manager with simulation context.
@@ -259,6 +263,7 @@ class NewtonManager(PhysicsManager):
         cls._up_axis = "Z"
         cls._model_changes = set()
         cls._views = []
+        cls._deformable_registry = []
 
     @classmethod
     def set_builder(cls, builder: ModelBuilder) -> None:

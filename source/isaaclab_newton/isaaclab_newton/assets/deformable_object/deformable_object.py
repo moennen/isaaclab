@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Sequence
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -17,9 +18,44 @@ from pxr import Usd, UsdGeom
 
 import isaaclab.sim as sim_utils
 from isaaclab.assets.deformable_object.base_deformable_object import BaseDeformableObject
-from isaaclab.physics import PhysicsEvent
+from isaaclab.physics import PhysicsEvent  # still needed for PHYSICS_READY callback
 
 from isaaclab_newton.physics import NewtonManager as SimulationManager
+
+
+@dataclass
+class DeformableRegistryEntry:
+    """Entry in the deformable body registry.
+
+    Registered by :class:`DeformableObject` during ``__init__``, consumed by
+    ``newton_physics_replicate`` inside the per-world ``begin_world``/``end_world`` loop.
+    After replication, ``particle_offsets`` and ``particles_per_body`` are filled in
+    so the asset can bind to the correct particle ranges.
+    """
+
+    prim_path: str
+    vertices: list  # list of wp.vec3
+    indices: list  # flat list of ints
+    is_tet: bool
+    init_pos: tuple[float, float, float]
+    init_rot: tuple[float, float, float, float]  # (w, x, y, z)
+    # Cloth params
+    density: float = 0.02
+    tri_ke: float = 1e4
+    tri_ka: float = 1e4
+    tri_kd: float = 1.5e-6
+    edge_ke: float = 5.0
+    edge_kd: float = 1e-2
+    particle_radius: float = 0.008
+    soft_contact_ke: float = 1e4
+    soft_contact_kd: float = 1e-2
+    # Tet params
+    k_mu: float = 1e5
+    k_lambda: float = 1e5
+    k_damp: float = 0.0
+    # Filled by newton_physics_replicate:
+    particle_offsets: list[int] = field(default_factory=list)
+    particles_per_body: int = 0
 
 from .deformable_object_data import DeformableObjectData
 from .kernels import (
@@ -62,19 +98,15 @@ class DeformableObject(BaseDeformableObject):
         Args:
             cfg: A configuration instance.
         """
-        # Track particle offsets recorded during MODEL_INIT (before super().__init__ triggers callbacks)
-        self._recorded_particle_offsets: list[int] = []
-        self._recorded_particles_per_body: int = 0
-
-        # Register MODEL_INIT callback to add cloth mesh to the Newton builder.
-        # This must happen before finalize() is called.
-        self._model_init_handle = SimulationManager.register_callback(
-            lambda payload: self._add_deformable_to_builder(payload),
-            PhysicsEvent.MODEL_INIT,
-            order=5,  # Run before default (10) to ensure mesh is added before finalize
-        )
-
+        # super().__init__ triggers the spawner, creating the USD prim.
+        # We need the prim to exist so we can read mesh data for the registry.
         super().__init__(cfg)
+
+        # Read mesh from the spawned USD prim and register in the deformable registry.
+        # newton_physics_replicate will consume this inside begin_world/end_world for
+        # proper per-world particle assignment.
+        self._registry_entry = self._register_deformable()
+
         # Register custom vec6f type for nodal state validation.
         self._DTYPE_TO_TORCH_TRAILING_DIMS = {**self._DTYPE_TO_TORCH_TRAILING_DIMS, vec6f: (6,)}
 
@@ -318,22 +350,16 @@ class DeformableObject(BaseDeformableObject):
             return wp.from_torch(env_ids.to(torch.int32), dtype=wp.int32)
         return env_ids
 
-    def _add_deformable_to_builder(self, payload) -> None:
-        """Add deformable meshes to the Newton ModelBuilder.
+    def _register_deformable(self) -> DeformableRegistryEntry:
+        """Read mesh from the spawned USD prim and register in NewtonManager's deformable registry.
 
-        Called during MODEL_INIT, before ``builder.finalize()``. Detects whether the
-        spawned prim has tet data (``newton:tetIndices`` attribute from :class:`TetMeshCuboidCfg`)
-        or only a triangle surface mesh, and uses the appropriate Newton builder API:
+        Called during ``__init__`` after the spawner has created the prim.
+        The registry entry is consumed by ``newton_physics_replicate`` inside
+        ``begin_world``/``end_world`` for proper per-world particle assignment.
 
-        - **Tet mesh**: ``builder.add_soft_mesh()``
-        - **Surface mesh** (cloth): ``builder.add_cloth_mesh()``
+        Returns:
+            The registry entry (also stored on NewtonManager._deformable_registry).
         """
-        builder = SimulationManager._builder
-        if builder is None:
-            return
-
-        num_envs = SimulationManager._num_envs or 1
-
         # Find the spawned mesh prim
         template_prim = sim_utils.find_first_matching_prim(self.cfg.prim_path)
         if template_prim is None:
@@ -363,146 +389,66 @@ class DeformableObject(BaseDeformableObject):
                 "Please ensure the spawn config creates a mesh prim (e.g. MeshFromFileCfg or TetMeshCuboidCfg)."
             )
 
-        # Detect whether the prim is a TetMesh (volumetric) or Mesh (surface cloth)
-        has_tet_mesh = mesh_prim.IsA(UsdGeom.TetMesh) if hasattr(UsdGeom, "TetMesh") else False
+        # Read mesh data
+        is_tet = mesh_prim.IsA(UsdGeom.TetMesh) if has_tet_type else False
 
-        if has_tet_mesh:
+        if is_tet:
             tet_mesh = UsdGeom.TetMesh(mesh_prim)
-            tet_points = np.array(tet_mesh.GetPointsAttr().Get(), dtype=np.float32)
-            vertices = [wp.vec3(float(p[0]), float(p[1]), float(p[2])) for p in tet_points]
-            # TetVertexIndices is Vec4iArray — flatten to list of ints
+            pts = np.array(tet_mesh.GetPointsAttr().Get(), dtype=np.float32)
+            vertices = [wp.vec3(float(p[0]), float(p[1]), float(p[2])) for p in pts]
             raw_tet_indices = tet_mesh.GetTetVertexIndicesAttr().Get()
-            tet_indices = []
+            indices = []
             for vec4i in raw_tet_indices:
-                tet_indices.extend([int(vec4i[0]), int(vec4i[1]), int(vec4i[2]), int(vec4i[3])])
+                indices.extend([int(vec4i[0]), int(vec4i[1]), int(vec4i[2]), int(vec4i[3])])
             logger.info(
-                f"Found UsdGeom.TetMesh: {len(tet_points)} vertices, {len(tet_indices) // 4} tetrahedra. "
-                "Using builder.add_soft_mesh()."
+                f"Registered UsdGeom.TetMesh: {len(pts)} vertices, {len(indices) // 4} tetrahedra."
             )
         else:
             usd_mesh = UsdGeom.Mesh(mesh_prim)
-            mesh_points = np.array(usd_mesh.GetPointsAttr().Get(), dtype=np.float32)
-            mesh_indices = list(usd_mesh.GetFaceVertexIndicesAttr().Get())
-            vertices = [wp.vec3(float(p[0]), float(p[1]), float(p[2])) for p in mesh_points]
-            logger.info(
-                f"Found UsdGeom.Mesh: {len(mesh_points)} vertices. Using builder.add_cloth_mesh()."
-            )
+            pts = np.array(usd_mesh.GetPointsAttr().Get(), dtype=np.float32)
+            vertices = [wp.vec3(float(p[0]), float(p[1]), float(p[2])) for p in pts]
+            indices = list(usd_mesh.GetFaceVertexIndicesAttr().Get())
+            logger.info(f"Registered UsdGeom.Mesh: {len(pts)} vertices.")
 
-        # Get initial pose from config
         init_pos = self.cfg.init_state.pos if hasattr(self.cfg.init_state, "pos") else (0.0, 0.0, 0.0)
         init_rot = self.cfg.init_state.rot if hasattr(self.cfg.init_state, "rot") else (1.0, 0.0, 0.0, 0.0)
 
-        env_positions = self._get_env_positions(num_envs)
-
-        # Note: Particles are added as global (world -1) rather than per-world.
-        # Newton requires particle_world indices to be monotonically non-decreasing,
-        # but multiple DeformableObjects each register independent MODEL_INIT callbacks,
-        # making it impossible to guarantee monotonic ordering across objects.
-        # Environments are spatially separated by env_positions, preventing inter-env interaction.
-        # TODO: For full world isolation, implement a coordinated multi-object callback
-        #   that adds all deformable objects per world in order.
-
-        for env_idx in range(num_envs):
-            before_count = getattr(builder, "particle_count", 0)
-
-            env_pos = env_positions[env_idx] if env_positions is not None else (0.0, 0.0, 0.0)
-            body_pos = wp.vec3(
-                init_pos[0] + env_pos[0],
-                init_pos[1] + env_pos[1],
-                init_pos[2] + env_pos[2],
-            )
-            body_rot = wp.quat(init_rot[0], init_rot[1], init_rot[2], init_rot[3])
-
-            if has_tet_mesh:
-                builder.add_soft_mesh(
-                    pos=body_pos,
-                    rot=body_rot,
-                    scale=1.0,
-                    vel=wp.vec3(0.0, 0.0, 0.0),
-                    vertices=vertices,
-                    indices=tet_indices,
-                    density=self.cfg.density,
-                    k_mu=self.cfg.k_mu,
-                    k_lambda=self.cfg.k_lambda,
-                    k_damp=self.cfg.k_damp,
-                    particle_radius=self.cfg.particle_radius,
-                )
-            else:
-                builder.add_cloth_mesh(
-                    pos=body_pos,
-                    rot=body_rot,
-                    scale=1.0,
-                    vel=wp.vec3(0.0, 0.0, 0.0),
-                    vertices=vertices,
-                    indices=mesh_indices,
-                    density=self.cfg.density,
-                    tri_ke=self.cfg.tri_ke,
-                    tri_ka=self.cfg.tri_ka,
-                    tri_kd=self.cfg.tri_kd,
-                    edge_ke=self.cfg.edge_ke,
-                    edge_kd=self.cfg.edge_kd,
-                    particle_radius=self.cfg.particle_radius,
-                )
-
-            after_count = getattr(builder, "particle_count", 0)
-            delta = after_count - before_count
-
-            self._recorded_particle_offsets.append(before_count)
-            if env_idx == 0:
-                self._recorded_particles_per_body = delta
-            elif delta != self._recorded_particles_per_body:
-                logger.warning(
-                    f"Env {env_idx} has {delta} particles vs {self._recorded_particles_per_body} for env 0. "
-                    "All environments must have the same number of particles."
-                )
-
-        builder.color()
-
-        mesh_type = "tet" if has_tet_mesh else "cloth"
-        logger.info(
-            f"Newton deformable ({mesh_type}): {num_envs} instances, "
-            f"{self._recorded_particles_per_body} particles each, offsets={self._recorded_particle_offsets}"
+        entry = DeformableRegistryEntry(
+            prim_path=self.cfg.prim_path,
+            vertices=vertices,
+            indices=indices,
+            is_tet=is_tet,
+            init_pos=init_pos,
+            init_rot=init_rot,
+            density=self.cfg.density,
+            tri_ke=self.cfg.tri_ke,
+            tri_ka=self.cfg.tri_ka,
+            tri_kd=self.cfg.tri_kd,
+            edge_ke=self.cfg.edge_ke,
+            edge_kd=self.cfg.edge_kd,
+            particle_radius=self.cfg.particle_radius,
+            soft_contact_ke=self.cfg.soft_contact_ke,
+            soft_contact_kd=self.cfg.soft_contact_kd,
+            k_mu=self.cfg.k_mu,
+            k_lambda=self.cfg.k_lambda,
+            k_damp=self.cfg.k_damp,
         )
-
-    def _get_env_positions(self, num_envs: int) -> list[tuple[float, float, float]] | None:
-        """Get world positions of each environment from the USD stage.
-
-        Returns:
-            List of (x, y, z) positions for each env, or None if only one env.
-        """
-        if num_envs <= 1:
-            return None
-
-        from pxr import UsdGeom
-
-        from isaaclab.sim.utils.stage import get_current_stage
-
-        stage = get_current_stage()
-        env_positions = []
-        xform_cache = UsdGeom.XformCache()
-
-        for env_idx in range(num_envs):
-            env_path = f"/World/envs/env_{env_idx}"
-            env_prim = stage.GetPrimAtPath(env_path)
-            if env_prim and env_prim.IsValid():
-                xform = xform_cache.GetLocalToWorldTransform(env_prim)
-                trans = xform.ExtractTranslation()
-                env_positions.append((trans[0], trans[1], trans[2]))
-            else:
-                env_positions.append((0.0, 0.0, 0.0))
-
-        return env_positions
+        SimulationManager._deformable_registry.append(entry)
+        return entry
 
     def _initialize_impl(self):
         """Initialize physics handles and buffers after the Newton model is ready."""
-        # Store instance count and particle info from MODEL_INIT phase
-        self._num_instances = len(self._recorded_particle_offsets)
-        self._particles_per_body = self._recorded_particles_per_body
+        # Read particle offsets from the registry entry (filled by newton_physics_replicate
+        # or by the MODEL_INIT fallback)
+        entry = self._registry_entry
+        self._num_instances = len(entry.particle_offsets)
+        self._particles_per_body = entry.particles_per_body
+        self._recorded_particle_offsets = entry.particle_offsets
 
         if self._num_instances == 0:
             raise RuntimeError(
                 f"No deformable body instances found for '{self.cfg.prim_path}'. "
-                "The MODEL_INIT callback may not have been invoked."
+                "Ensure newton_physics_replicate or MODEL_INIT processed the registry."
             )
 
         logger.info(f"Newton deformable object initialized at: {self.cfg.prim_path}")
@@ -725,9 +671,6 @@ class DeformableObject(BaseDeformableObject):
     def _clear_callbacks(self) -> None:
         """Clears all registered callbacks."""
         super()._clear_callbacks()
-        if hasattr(self, "_model_init_handle") and self._model_init_handle is not None:
-            self._model_init_handle.deregister()
-            self._model_init_handle = None
         if hasattr(self, "_physics_ready_handle") and self._physics_ready_handle is not None:
             self._physics_ready_handle.deregister()
             self._physics_ready_handle = None
