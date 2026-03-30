@@ -394,6 +394,14 @@ class DeformableObject(BaseDeformableObject):
 
         env_positions = self._get_env_positions(num_envs)
 
+        # Note: Particles are added as global (world -1) rather than per-world.
+        # Newton requires particle_world indices to be monotonically non-decreasing,
+        # but multiple DeformableObjects each register independent MODEL_INIT callbacks,
+        # making it impossible to guarantee monotonic ordering across objects.
+        # Environments are spatially separated by env_positions, preventing inter-env interaction.
+        # TODO: For full world isolation, implement a coordinated multi-object callback
+        #   that adds all deformable objects per world in order.
+
         for env_idx in range(num_envs):
             before_count = getattr(builder, "particle_count", 0)
 

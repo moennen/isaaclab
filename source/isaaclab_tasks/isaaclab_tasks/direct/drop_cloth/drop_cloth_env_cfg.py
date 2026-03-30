@@ -3,8 +3,8 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-import importlib
-import os
+import importlib.util
+import os.path
 
 import isaaclab.sim as sim_utils
 from isaaclab.assets.deformable_object import DeformableObjectCfg
@@ -40,7 +40,8 @@ class DropClothPhysicsCfg(PresetCfg):
             particle_self_contact_radius=particle_self_contact_radius,
             particle_self_contact_margin=particle_self_contact_margin,
             particle_topological_contact_filter_threshold=1,
-            particle_rest_shape_contact_exclusion_radius=0.5,
+            # particle_rest_shape_contact_exclusion_radius=0.5,
+            particle_rest_shape_contact_exclusion_radius=0.0,
             particle_enable_self_contact=True,
             particle_vertex_contact_buffer_size=16,
             particle_edge_contact_buffer_size=20,
@@ -48,8 +49,7 @@ class DropClothPhysicsCfg(PresetCfg):
             rigid_contact_k_start=soft_contact_ke,
         ),
         num_substeps=10,
-        use_cuda_graph=False,
-        # use_cuda_graph=True,
+        use_cuda_graph=True,
     )
     newton: NewtonCfg = default
 
@@ -58,7 +58,7 @@ class DropClothPhysicsCfg(PresetCfg):
 class DropClothEnvCfg(DirectRLEnvCfg):
     # env
     decimation = 2
-    episode_length_s = 2.0
+    episode_length_s = 4.0
     # no RL actions; minimal observation space
     action_space = 0
     observation_space = 1
@@ -68,7 +68,11 @@ class DropClothEnvCfg(DirectRLEnvCfg):
     sim: SimulationCfg = SimulationCfg(dt=1 / 60, render_interval=decimation, physics=DropClothPhysicsCfg())
 
     # scene
-    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=1, env_spacing=4.0, replicate_physics=False)
+    scene: InteractiveSceneCfg = InteractiveSceneCfg(
+        num_envs=1,
+        env_spacing=2.0,  # envs are 2m apart
+        replicate_physics=False,
+    )
 
     # cloth asset — mesh geometry loaded from USD file and spawned as UsdGeom.Mesh prim
     cloth: DeformableObjectCfg = DeformableObjectCfg(
@@ -80,8 +84,9 @@ class DropClothEnvCfg(DirectRLEnvCfg):
             visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.2, 0.2, 0.8)),
         ),
         init_state=DeformableObjectCfg.InitialStateCfg(
-            pos=(0.0, 0.0, 0.5),
-            rot=(0.0, 0.0, 1.0, 0.0),  # 180° around z-axis (w, x, y, z)
+            pos=(0.0, 0.0, 0.8),  # drop from above the cube
+            # rot=(0.0, 0.0, 1.0, 0.0),  # (w, x, y, z)
+            rot=(1.0, 0.0, 0.0, 0.0),  # (w, x, y, z)
         ),
         density=0.02,
         tri_ke=1e4,
@@ -89,7 +94,7 @@ class DropClothEnvCfg(DirectRLEnvCfg):
         tri_kd=1.5e-6,
         edge_ke=5.0,
         edge_kd=1e-2,
-        particle_radius=0.008,
+        particle_radius=0.01,
         soft_contact_ke=1e4,
         soft_contact_kd=1e-2,
     )
@@ -102,7 +107,7 @@ class DropClothEnvCfg(DirectRLEnvCfg):
             resolution=4,
             visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.8, 0.4, 0.0)),
         ),
-        init_state=DeformableObjectCfg.InitialStateCfg(pos=(0.3, 0.0, 0.5)),
+        init_state=DeformableObjectCfg.InitialStateCfg(pos=(0.0, -1.2, 0.3)),  # cube on ground, cloth drops onto it
         density=1000.0,
         k_mu=3448.3,       # E=1e4, nu=0.45 → E / (2*(1+nu))
         k_lambda=31034.5,  # E=1e4, nu=0.45 → E*nu / ((1+nu)*(1-2*nu))
