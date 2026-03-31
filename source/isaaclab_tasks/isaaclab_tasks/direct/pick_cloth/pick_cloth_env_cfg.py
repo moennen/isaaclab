@@ -18,7 +18,7 @@ from isaaclab.sim.spawners.meshes import MeshFromFileCfg
 from isaaclab.utils import configclass
 from isaaclab_newton.physics import CoupledSolverCfg, FeatherstoneSolverCfg, MJWarpSolverCfg, NewtonCfg, VBDSolverCfg
 
-from isaaclab_assets.robots.franka import FRANKA_PANDA_HIGH_PD_CFG
+from isaaclab_assets.robots.franka import FRANKA_PANDA_HIGH_PD_CFG, FRANKA_PANDA_CFG
 from isaaclab_tasks.utils import PresetCfg
 
 # Locate shirt USD from Newton package (defer import to avoid pxr before SimulationApp).
@@ -80,7 +80,7 @@ class PickClothPhysicsCfg(PresetCfg):
             vbd=_VBD_CFG,
             soft_contact_margin=0.01,
         ),
-        num_substeps=60,
+        num_substeps=30,
         use_cuda_graph=True,
     )
 
@@ -106,7 +106,8 @@ class PickClothEnvCfg(DirectRLEnvCfg):
     )
 
     # robot — HIGH_PD_CFG: stiffness=400, damping=80, gravity disabled for stable control
-    robot_cfg: ArticulationCfg = FRANKA_PANDA_HIGH_PD_CFG.replace(prim_path="/World/envs/env_.*/Robot")
+    # robot_cfg: ArticulationCfg = FRANKA_PANDA_HIGH_PD_CFG.replace(prim_path="/World/envs/env_.*/Robot")
+    robot_cfg: ArticulationCfg = FRANKA_PANDA_CFG.replace(prim_path="/World/envs/env_.*/Robot")
 
     # joint names to control (7 arm joints, excluding fingers)
     arm_joint_names = ["panda_joint[1-7]"]
