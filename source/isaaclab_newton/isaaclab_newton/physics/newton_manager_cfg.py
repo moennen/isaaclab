@@ -269,6 +269,32 @@ class VBDSolverCfg(NewtonSolverCfg):
 
 
 @configclass
+class CoupledSolverCfg(NewtonSolverCfg):
+    """Configuration for the coupled rigid-body + VBD solver.
+
+    Alternates a rigid-body solver and a cloth solver (:class:`SolverVBD`) per
+    substep, implementing one-way coupling (rigid -> cloth).
+
+    The rigid-body solver is selected by :attr:`rigid_solver_cfg`:
+
+    - :class:`MJWarpSolverCfg` — MuJoCo Warp (default, recommended for stability)
+    - :class:`FeatherstoneSolverCfg` — Newton Featherstone
+    """
+
+    solver_type: str = "coupled"
+
+    rigid_solver_cfg: NewtonSolverCfg = MJWarpSolverCfg()
+    """Rigid-body sub-solver configuration. Can be :class:`MJWarpSolverCfg` or
+    :class:`FeatherstoneSolverCfg`."""
+
+    vbd: VBDSolverCfg = VBDSolverCfg(integrate_with_external_rigid_solver=True)
+    """VBD sub-solver configuration for cloth/particle dynamics."""
+
+    soft_contact_margin: float = 0.01
+    """Soft-contact detection margin for the CollisionPipeline [m]."""
+
+
+@configclass
 class NewtonCfg(PhysicsCfg):
     """Configuration for Newton physics manager.
 

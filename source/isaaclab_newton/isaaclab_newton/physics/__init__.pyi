@@ -4,6 +4,7 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 __all__ = [
+    "CoupledSolverCfg",
     "FeatherstoneSolverCfg",
     "MJWarpSolverCfg",
     "NewtonCfg",
@@ -14,4 +15,4 @@ __all__ = [
 ]
 
 from .newton_manager import NewtonManager
-from .newton_manager_cfg import FeatherstoneSolverCfg, MJWarpSolverCfg, NewtonCfg, NewtonSolverCfg, VBDSolverCfg, XPBDSolverCfg
+from .newton_manager_cfg import CoupledSolverCfg, FeatherstoneSolverCfg, MJWarpSolverCfg, NewtonCfg, NewtonSolverCfg, VBDSolverCfg, XPBDSolverCfg
