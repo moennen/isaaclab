@@ -78,7 +78,13 @@ class ObjectCfg(PresetCfg):
         mass_props=sim_utils.MassPropertiesCfg(mass=0.2),
     )
     mesh = sim_utils.UsdFileCfg(
-        usd_path="/mnt/dev/isaac-newton3/assets/blueHairRagdoll16k.usd",
+        usd_path="/mnt/dev/isaac-newton3/assets/blueHairRagdollLR.usd",
+        rigid_props=sim_utils.RigidBodyPropertiesCfg(
+            solver_position_iteration_count=16,
+            solver_velocity_iteration_count=1,
+            max_depenetration_velocity=1.0,
+            disable_gravity=False,
+        ),
     )
     default = shapes
 
@@ -175,8 +181,8 @@ class ObservationsCfg:
     class ProprioObsCfg(ObsGroup):
         """Observations for proprioception group."""
 
-        joint_pos = ObsTerm(func=mdp.joint_pos, noise=Unoise(n_min=-0.0, n_max=0.0))
-        joint_vel = ObsTerm(func=mdp.joint_vel, noise=Unoise(n_min=-0.0, n_max=0.0))
+        joint_pos = ObsTerm(func=mdp.joint_pos, noise=Unoise(n_min=-0.0, n_max=0.0), clip=(-5.0, 5.0))
+        joint_vel = ObsTerm(func=mdp.joint_vel, noise=Unoise(n_min=-0.0, n_max=0.0), clip=(-50.0, 50.0))
         hand_tips_state_b = ObsTerm(
             func=mdp.body_state_b,
             noise=Unoise(n_min=-0.0, n_max=0.0),
