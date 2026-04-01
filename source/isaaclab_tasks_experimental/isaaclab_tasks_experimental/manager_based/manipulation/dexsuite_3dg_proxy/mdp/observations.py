@@ -98,9 +98,9 @@ def body_state_b(
     body_pos_b, body_quat_b = subtract_frame_transforms(root_pos_w, root_quat_w, body_pos_w, body_quat_w)
     body_lin_vel_b = quat_apply_inverse(root_quat_w, body_lin_vel_w)
     body_ang_vel_b = quat_apply_inverse(root_quat_w, body_ang_vel_w)
-    # concate and return
+    # concate and return; replace any NaN/inf that physics explosions may leave
     out = torch.cat((body_pos_b, body_quat_b, body_lin_vel_b, body_ang_vel_b), dim=1)
-    return out.view(env.num_envs, -1)
+    return out.nan_to_num_(nan=0.0, posinf=0.0, neginf=0.0).view(env.num_envs, -1)
 
 
 class object_point_cloud_b(ManagerTermBase):

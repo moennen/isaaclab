@@ -52,7 +52,9 @@ class out_of_bound(ManagerTermBase):
         in_bound_range: dict[str, tuple[float, float]] = {},
     ) -> torch.Tensor:
         pos_w = wp.to_torch(self._object.data.root_pos_w)
-        return ((pos_w < self._lower) | (pos_w > self._upper)).any(dim=1)
+        out_of_range = ((pos_w < self._lower) | (pos_w > self._upper)).any(dim=1)
+        has_nan = (~pos_w.isfinite()).any(dim=1)
+        return out_of_range | has_nan
 
 
 def abnormal_robot_state(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")) -> torch.Tensor:
@@ -61,4 +63,8 @@ def abnormal_robot_state(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg = Sce
     robot: Articulation = env.scene[asset_cfg.name]
     joint_vel = wp.to_torch(robot.data.joint_vel)
     joint_vel_limits = wp.to_torch(robot.data.joint_vel_limits)
-    return (joint_vel.abs() > (joint_vel_limits * 2)).any(dim=1)
+    over_limit = (joint_vel.abs() > (joint_vel_limits * 2)).any(dim=1)
+    has_nan = (~joint_vel.isfinite()).any(dim=1)
+    joint_pos = wp.to_torch(robot.data.joint_pos)
+    has_nan = has_nan | (~joint_pos.isfinite()).any(dim=1)
+    return over_limit | has_nan
