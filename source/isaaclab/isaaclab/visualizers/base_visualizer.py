@@ -8,10 +8,14 @@
 from __future__ import annotations
 
 import logging
+import os
 import random
 import re
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any
+
+import numpy as np
+from PIL import Image
 
 if TYPE_CHECKING:
     from isaaclab.physics import SceneDataProvider
@@ -38,6 +42,10 @@ class BaseVisualizer(ABC):
         self._scene_data_provider = None
         self._is_initialized = False
         self._is_closed = False
+
+        # Screenshot recording state (initialized lazily via record_dir setter or from config)
+        self._record_dir: str | None = None
+        self._record_frame: int = 0
 
     @abstractmethod
     def initialize(self, scene_data_provider: SceneDataProvider) -> None:
@@ -281,6 +289,47 @@ class BaseVisualizer(ABC):
         vector = torch.tensor(vec, dtype=torch.float32).unsqueeze(0)
         rotated = quat_apply(quat, vector)[0]
         return (float(rotated[0]), float(rotated[1]), float(rotated[2]))
+
+    @property
+    def record_dir(self) -> str | None:
+        """Directory where screenshot PNGs are saved, or ``None`` if recording is disabled."""
+        return self._record_dir
+
+    @record_dir.setter
+    def record_dir(self, path: str | None) -> None:
+        """Enable or disable screenshot recording.
+
+        Args:
+            path: Directory to save screenshots, or empty/``None`` to disable.
+        """
+        self._record_dir = path or None
+        if self._record_dir is not None:
+            self._record_frame = 0
+            os.makedirs(self._record_dir, exist_ok=True)
+            logger.info("[Visualizer] Recording screenshots to %s", path)
+
+    def get_frame(self) -> np.ndarray | None:
+        """Capture the current rendered frame as a numpy RGB array.
+
+        Subclasses should override this to return an ``(H, W, 3)`` uint8 array.
+        Returns ``None`` when frame capture is not supported.
+        """
+        return None
+
+    def save_frame(self) -> None:
+        """Save the current rendered frame to disk if recording is enabled."""
+        # Lazy initialization from config on first call
+        if self._record_dir is None and getattr(self.cfg, "record_dir", ""):
+            self.record_dir = self.cfg.record_dir
+        if self._record_dir is None:
+            return
+        frame = self.get_frame()
+        if frame is None:
+            return
+
+        img = Image.fromarray(frame)
+        img.save(os.path.join(self._record_dir, f"frame_{self._record_frame:06d}.png"))
+        self._record_frame += 1
 
     def reset(self, soft: bool = False) -> None:
         """Reset visualizer state.

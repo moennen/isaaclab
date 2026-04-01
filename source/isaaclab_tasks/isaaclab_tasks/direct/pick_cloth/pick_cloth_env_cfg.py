@@ -17,6 +17,7 @@ from isaaclab.sim import SimulationCfg
 from isaaclab.sim.spawners.meshes import MeshFromFileCfg
 from isaaclab.utils import configclass
 from isaaclab_newton.physics import CoupledSolverCfg, FeatherstoneSolverCfg, MJWarpSolverCfg, NewtonCfg, VBDSolverCfg
+from isaaclab_visualizers.newton import NewtonVisualizerCfg
 
 from isaaclab_assets.robots.franka import FRANKA_PANDA_HIGH_PD_CFG, FRANKA_PANDA_CFG
 from isaaclab_tasks.utils import PresetCfg
@@ -97,7 +98,16 @@ class PickClothEnvCfg(DirectRLEnvCfg):
     state_space = 0
 
     # simulation
-    sim: SimulationCfg = SimulationCfg(dt=1 / 60, render_interval=decimation, physics=PickClothPhysicsCfg())
+    sim: SimulationCfg = SimulationCfg(
+        dt=1 / 60,
+        render_interval=decimation,
+        physics=PickClothPhysicsCfg(),
+        visualizer_cfgs=NewtonVisualizerCfg(
+            camera_position=(2.0, 2.0, 2.0),
+            camera_target=(0.0, 0.0, 0.5),
+            record_dir="",
+        ),
+    )
 
     # scene
     scene: InteractiveSceneCfg = InteractiveSceneCfg(

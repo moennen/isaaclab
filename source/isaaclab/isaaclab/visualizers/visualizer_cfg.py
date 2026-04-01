@@ -62,6 +62,16 @@ class VisualizerCfg:
     Note, OV visualizer only applies a cosmetic visibility toggle (no performance gain).
     """
 
+    record_dir: str = ""
+    """Directory to save screenshot PNGs each frame.
+
+    When set to a non-empty path, the visualizer captures the rendered frame
+    after each step and saves it as a PNG image.  Frames are organized into
+    per-episode subdirectories (``episode_0000/``, ``episode_0001/``, …) and
+    named sequentially (``frame_000000.png``, ``frame_000001.png``, …).
+    Leave empty (default) to disable recording.
+    """
+
     def get_visualizer_type(self) -> str | None:
         """Get the visualizer type identifier.
 

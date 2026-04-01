@@ -396,6 +396,7 @@ class NewtonVisualizer(BaseVisualizer):
                         except RuntimeError as exc:
                             logger.debug(f"[NewtonVisualizer] Failed to log contacts: {exc}")
                 self._viewer.end_frame()
+                self.save_frame()
             else:
                 self._viewer._update()
         except Exception as exc:
@@ -487,3 +488,14 @@ class NewtonVisualizer(BaseVisualizer):
         if not self._is_initialized or self._viewer is None:
             return False
         return self._viewer.is_rendering_paused()
+
+    def get_frame(self) -> np.ndarray | None:
+        """Capture the current rendered frame from the Newton OpenGL viewer.
+
+        Returns:
+            An ``(H, W, 3)`` uint8 numpy array, or ``None`` if the viewer is unavailable.
+        """
+        if self._viewer is None:
+            return None
+        frame_wp = self._viewer.get_frame()
+        return frame_wp.numpy()
