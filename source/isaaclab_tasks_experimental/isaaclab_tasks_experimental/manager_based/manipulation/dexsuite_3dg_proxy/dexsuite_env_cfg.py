@@ -86,6 +86,11 @@ class ObjectCfg(PresetCfg):
             disable_gravity=False,
         ),
     )
+    # Visual-only USD for deformable mode: no rigid_props / collision_props baked in.
+    # Physics is handled entirely by the VBD solver in Dexsuite3dgProxyNewtonManager.
+    deformable = sim_utils.UsdFileCfg(
+        usd_path="/mnt/dev/isaac-newton3/assets/blueHairRagdollLR.usd",
+    )
     default = shapes
 
 
