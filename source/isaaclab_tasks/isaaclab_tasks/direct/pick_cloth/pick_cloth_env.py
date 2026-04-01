@@ -28,6 +28,15 @@ class PickClothEnv(DirectRLEnv):
     cfg: PickClothEnvCfg
 
     def __init__(self, cfg: PickClothEnvCfg, render_mode: str | None = None, **kwargs):
+        # For velocity control, override actuator gains before the robot is spawned:
+        # zero stiffness (no position tracking), high damping (velocity-tracking gain).
+        # Featherstone torque: tau = ke*(pos_target - q) + kd*(vel_target - qd)
+        # With ke=0: tau = kd*(vel_target - qd)  — proportional velocity control.
+        if cfg.control_mode == "velocity":
+            for actuator in cfg.robot_cfg.actuators.values():
+                actuator.stiffness = 0.0
+                actuator.damping = 200.0
+
         super().__init__(cfg, render_mode, **kwargs)
 
         self._arm_joint_idx, _ = self.robot.find_joints(self.cfg.arm_joint_names)
@@ -39,6 +48,8 @@ class PickClothEnv(DirectRLEnv):
         # Find EE body index for reward computation
         ee_body_idx, _ = self.robot.find_bodies("panda_hand")
         self._ee_body_idx = int(ee_body_idx[0])
+
+        logger.info("PickClothEnv: control_mode=%s, action_scale=%s", self.cfg.control_mode, cfg.action_scale)
 
     def _setup_scene(self):
         # Robot
@@ -63,8 +74,14 @@ class PickClothEnv(DirectRLEnv):
         self.actions = actions.clone()
 
     def _apply_action(self) -> None:
-        targets = self._default_joint_pos[:, self._arm_joint_idx] + self.actions * self.cfg.action_scale
-        self.robot.set_joint_position_target_index(target=targets, joint_ids=self._arm_joint_idx)
+        if self.cfg.control_mode == "velocity":
+            # Velocity control: actions are target joint velocities [rad/s]
+            vel_targets = self.actions * self.cfg.action_scale
+            self.robot.set_joint_velocity_target_index(target=vel_targets, joint_ids=self._arm_joint_idx)
+        else:
+            # Position control: actions are offsets from default pose [rad]
+            pos_targets = self._default_joint_pos[:, self._arm_joint_idx] + self.actions * self.cfg.action_scale
+            self.robot.set_joint_position_target_index(target=pos_targets, joint_ids=self._arm_joint_idx)
 
     def _get_observations(self) -> dict:
         self.cloth.update(self.step_dt)

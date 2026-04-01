@@ -58,7 +58,7 @@ class PickClothPhysicsCfg(PresetCfg):
     default: NewtonCfg = NewtonCfg(
         solver_cfg=CoupledSolverCfg(
             rigid_solver_cfg=MJWarpSolverCfg(
-                njmax=20,
+                njmax=21,
                 nconmax=20,
                 ls_iterations=20,
                 cone="pyramidal",
@@ -72,6 +72,7 @@ class PickClothPhysicsCfg(PresetCfg):
         num_substeps=10,
         use_cuda_graph=True,
     )
+
     newton: NewtonCfg = default
 
     featherstone: NewtonCfg = NewtonCfg(
@@ -105,14 +106,18 @@ class PickClothEnvCfg(DirectRLEnvCfg):
         replicate_physics=True,
     )
 
-    # robot — HIGH_PD_CFG: stiffness=400, damping=80, gravity disabled for stable control
-    # robot_cfg: ArticulationCfg = FRANKA_PANDA_HIGH_PD_CFG.replace(prim_path="/World/envs/env_.*/Robot")
+    # robot
     robot_cfg: ArticulationCfg = FRANKA_PANDA_CFG.replace(prim_path="/World/envs/env_.*/Robot")
+    # robot_cfg: ArticulationCfg = FRANKA_PANDA_HIGH_PD_CFG.replace(prim_path="/World/envs/env_.*/Robot")
 
     # joint names to control (7 arm joints, excluding fingers)
     arm_joint_names = ["panda_joint[1-7]"]
 
-    # action scale — position offset from default pose [rad]
+    # control mode: "position" (PD, actions are joint position offsets [rad])
+    #               "velocity" (P on velocity, actions are joint velocity targets [rad/s])
+    control_mode: str = "position"
+
+    # action scale applied to raw actions before use as targets
     action_scale = 0.5
 
     # cloth asset — shirt mesh loaded from Newton assets
