@@ -61,7 +61,7 @@ def object_ee_distance(
     object_pos = wp.to_torch(obj.data.root_pos_w)
     distance = torch.linalg.norm(asset_pos - object_pos[:, None, :], dim=-1).max(dim=-1).values
     contact_bonus = contacts(env, contact_threshold, thumb_name, finger_names).float().clamp(0.1, 1.0)
-    return (1 - torch.tanh(distance / std)) * contact_bonus
+    return ((1 - torch.tanh(distance / std)) * contact_bonus).nan_to_num_(nan=0.0)
 
 
 def _contact_force_mag(sensor: ContactSensor, num_envs: int) -> torch.Tensor:
@@ -175,7 +175,7 @@ class success_reward(ManagerTermBase):
             reward = ((1 - torch.tanh(pos_dist / pos_std)) ** 2) * contact_mask.float()
             self.succeeded |= contact_mask & (pos_dist < pos_std)
 
-        return reward
+        return reward.nan_to_num_(nan=0.0)
 
 
 def position_command_error_tanh(
@@ -200,7 +200,7 @@ def position_command_error_tanh(
         des_pos_b,
     )
     distance = torch.linalg.norm(wp.to_torch(obj.data.root_pos_w) - des_pos_w, dim=1)
-    return (1 - torch.tanh(distance / std)) * contacts(env, contact_threshold, thumb_name, finger_names).float()
+    return ((1 - torch.tanh(distance / std)) * contacts(env, contact_threshold, thumb_name, finger_names).float()).nan_to_num_(nan=0.0)
 
 
 def orientation_command_error_tanh(
@@ -223,4 +223,4 @@ def orientation_command_error_tanh(
     des_quat_w = math_utils.quat_mul(root_state[:, 3:7], des_quat_b)
     quat_distance = math_utils.quat_error_magnitude(wp.to_torch(obj.data.root_quat_w), des_quat_w)
 
-    return (1 - torch.tanh(quat_distance / std)) * contacts(env, contact_threshold, thumb_name, finger_names).float()
+    return ((1 - torch.tanh(quat_distance / std)) * contacts(env, contact_threshold, thumb_name, finger_names).float()).nan_to_num_(nan=0.0)
