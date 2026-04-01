@@ -73,7 +73,9 @@ def main():
         asset_path=mesh_path,
         usd_dir=os.path.dirname(usd_path),
         usd_file_name=os.path.basename(usd_path),
-        mass_props=schemas_cfg.MassPropertiesCfg(mass=args.mass),
+        # Leave mass_props=None so PhysX auto-computes mass AND inertia from
+        # the collision geometry. Explicit mass overrides can be applied at
+        # spawn time via UsdFileCfg.mass_props if needed.
         rigid_props=schemas_cfg.RigidBodyPropertiesCfg(
             solver_position_iteration_count=16,
             solver_velocity_iteration_count=0,
