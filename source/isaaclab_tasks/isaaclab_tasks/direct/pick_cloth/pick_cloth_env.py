@@ -28,32 +28,46 @@ class PickClothEnv(DirectRLEnv):
     cfg: PickClothEnvCfg
 
     def __init__(self, cfg: PickClothEnvCfg, render_mode: str | None = None, **kwargs):
+        self._has_robot = cfg.robot_cfg is not None
+
+        # Without a robot the coupled solver (rigid + VBD) is unnecessary and will
+        # fail because there are no rigid bodies.  Swap to VBD-only automatically.
+        if not self._has_robot:
+            from isaaclab_newton.physics import CoupledSolverCfg
+
+            physics_cfg = cfg.sim.physics
+            if hasattr(physics_cfg, "solver_cfg") and isinstance(physics_cfg.solver_cfg, CoupledSolverCfg):
+                physics_cfg.solver_cfg = physics_cfg.solver_cfg.vbd
+
         # For velocity control, override actuator gains before the robot is spawned:
         # zero stiffness (no position tracking), high damping (velocity-tracking gain).
         # Featherstone torque: tau = ke*(pos_target - q) + kd*(vel_target - qd)
         # With ke=0: tau = kd*(vel_target - qd)  — proportional velocity control.
-        if cfg.control_mode == "velocity":
+        if self._has_robot and cfg.control_mode == "velocity":
             for actuator in cfg.robot_cfg.actuators.values():
                 actuator.stiffness = 0.0
                 actuator.damping = 200.0
 
         super().__init__(cfg, render_mode, **kwargs)
 
-        self._arm_joint_idx, _ = self.robot.find_joints(self.cfg.arm_joint_names)
-        self._default_joint_pos = wp.to_torch(self.robot.data.default_joint_pos).clone()
+        if self._has_robot:
+            self._arm_joint_idx, _ = self.robot.find_joints(self.cfg.arm_joint_names)
+            self._default_joint_pos = wp.to_torch(self.robot.data.default_joint_pos).clone()
 
-        self.joint_pos = wp.to_torch(self.robot.data.joint_pos)
-        self.joint_vel = wp.to_torch(self.robot.data.joint_vel)
+            self.joint_pos = wp.to_torch(self.robot.data.joint_pos)
+            self.joint_vel = wp.to_torch(self.robot.data.joint_vel)
 
-        # Find EE body index for reward computation
-        ee_body_idx, _ = self.robot.find_bodies("panda_hand")
-        self._ee_body_idx = int(ee_body_idx[0])
+            # Find EE body index for reward computation
+            ee_body_idx, _ = self.robot.find_bodies("panda_hand")
+            self._ee_body_idx = int(ee_body_idx[0])
 
-        logger.info("PickClothEnv: control_mode=%s, action_scale=%s", self.cfg.control_mode, cfg.action_scale)
+        logger.info("PickClothEnv: has_robot=%s, control_mode=%s, action_scale=%s",
+                     self._has_robot, self.cfg.control_mode, cfg.action_scale)
 
     def _setup_scene(self):
-        # Robot
-        self.robot = Articulation(self.cfg.robot_cfg)
+        # Robot (optional)
+        if self._has_robot:
+            self.robot = Articulation(self.cfg.robot_cfg)
 
         # Cloth asset (triangle surface mesh)
         self.cloth = DeformableObject(self.cfg.cloth)
@@ -66,7 +80,8 @@ class PickClothEnv(DirectRLEnv):
 
         # Clone environments
         self.scene.clone_environments(copy_from_source=False)
-        self.scene.articulations["robot"] = self.robot
+        if self._has_robot:
+            self.scene.articulations["robot"] = self.robot
 
     # ─── RL interface ────────────────────────────────────────────────────────
 
@@ -74,6 +89,8 @@ class PickClothEnv(DirectRLEnv):
         self.actions = actions.clone()
 
     def _apply_action(self) -> None:
+        if not self._has_robot:
+            return
         if self.cfg.control_mode == "velocity":
             # Velocity control: actions are target joint velocities [rad/s]
             vel_targets = self.actions * self.cfg.action_scale
@@ -87,18 +104,20 @@ class PickClothEnv(DirectRLEnv):
         self.cloth.update(self.step_dt)
 
         # Cloth centroid: mean of all nodal positions
-        # nodal_pos_w is a wp.array of shape (num_envs, num_particles) with dtype vec3f
         nodal_pos = wp.to_torch(self.cloth.data.nodal_pos_w)  # (num_envs, num_particles, 3)
         self._cloth_centroid = nodal_pos.mean(dim=1)  # (num_envs, 3)
 
-        obs = torch.cat(
-            (
-                self.joint_pos[:, self._arm_joint_idx],   # (num_envs, 7)
-                self.joint_vel[:, self._arm_joint_idx],   # (num_envs, 7)
-                self._cloth_centroid,                      # (num_envs, 3)
-            ),
-            dim=-1,
-        )
+        if self._has_robot:
+            obs = torch.cat(
+                (
+                    self.joint_pos[:, self._arm_joint_idx],   # (num_envs, 7)
+                    self.joint_vel[:, self._arm_joint_idx],   # (num_envs, 7)
+                    self._cloth_centroid,                      # (num_envs, 3)
+                ),
+                dim=-1,
+            )
+        else:
+            obs = self._cloth_centroid  # (num_envs, 3)
         return {"policy": obs}
 
     def _get_rewards(self) -> torch.Tensor:
@@ -106,21 +125,24 @@ class PickClothEnv(DirectRLEnv):
         cloth_height = self._cloth_centroid[:, 2]  # z-component
         rew_cloth_height = self.cfg.rew_scale_cloth_height * cloth_height
 
-        # EE-to-cloth distance penalty — encourage reaching toward cloth
-        ee_pos = wp.to_torch(self.robot.data.body_pos_w)[:, self._ee_body_idx]  # (num_envs, 3)
-        ee_cloth_dist = torch.norm(ee_pos - self._cloth_centroid, dim=-1)
-        rew_ee_cloth_dist = self.cfg.rew_scale_ee_cloth_dist * ee_cloth_dist
+        if self._has_robot:
+            # EE-to-cloth distance penalty — encourage reaching toward cloth
+            ee_pos = wp.to_torch(self.robot.data.body_pos_w)[:, self._ee_body_idx]  # (num_envs, 3)
+            ee_cloth_dist = torch.norm(ee_pos - self._cloth_centroid, dim=-1)
+            rew_ee_cloth_dist = self.cfg.rew_scale_ee_cloth_dist * ee_cloth_dist
 
-        # Joint velocity penalty
-        rew_joint_vel = self.cfg.rew_scale_joint_vel * torch.sum(
-            torch.abs(self.joint_vel[:, self._arm_joint_idx]), dim=-1
-        )
+            # Joint velocity penalty
+            rew_joint_vel = self.cfg.rew_scale_joint_vel * torch.sum(
+                torch.abs(self.joint_vel[:, self._arm_joint_idx]), dim=-1
+            )
+            return rew_cloth_height + rew_ee_cloth_dist + rew_joint_vel
 
-        return rew_cloth_height + rew_ee_cloth_dist + rew_joint_vel
+        return rew_cloth_height
 
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
-        self.joint_pos = wp.to_torch(self.robot.data.joint_pos)
-        self.joint_vel = wp.to_torch(self.robot.data.joint_vel)
+        if self._has_robot:
+            self.joint_pos = wp.to_torch(self.robot.data.joint_pos)
+            self.joint_vel = wp.to_torch(self.robot.data.joint_vel)
 
         time_out = self.episode_length_buf >= self.max_episode_length - 1
         terminated = torch.zeros_like(time_out)
@@ -131,24 +153,25 @@ class PickClothEnv(DirectRLEnv):
             return
         super()._reset_idx(env_ids)
 
-        # Reset robot joint state to defaults
-        joint_pos = wp.to_torch(self.robot.data.default_joint_pos)[env_ids].clone()
-        joint_vel = wp.to_torch(self.robot.data.default_joint_vel)[env_ids].clone()
+        if self._has_robot:
+            # Reset robot joint state to defaults
+            joint_pos = wp.to_torch(self.robot.data.default_joint_pos)[env_ids].clone()
+            joint_vel = wp.to_torch(self.robot.data.default_joint_vel)[env_ids].clone()
 
-        # Root pose — add env origins for world frame
-        default_root_pose = wp.to_torch(self.robot.data.default_root_pose)[env_ids].clone()
-        default_root_pose[:, :3] += self.scene.env_origins[env_ids]
-        default_root_vel = wp.to_torch(self.robot.data.default_root_vel)[env_ids].clone()
+            # Root pose — add env origins for world frame
+            default_root_pose = wp.to_torch(self.robot.data.default_root_pose)[env_ids].clone()
+            default_root_pose[:, :3] += self.scene.env_origins[env_ids]
+            default_root_vel = wp.to_torch(self.robot.data.default_root_vel)[env_ids].clone()
 
-        # Update cached views
-        self.joint_pos[env_ids] = joint_pos
-        self.joint_vel[env_ids] = joint_vel
+            # Update cached views
+            self.joint_pos[env_ids] = joint_pos
+            self.joint_vel[env_ids] = joint_vel
 
-        # Write robot state to simulation
-        self.robot.write_root_pose_to_sim_index(root_pose=default_root_pose, env_ids=env_ids)
-        self.robot.write_root_velocity_to_sim_index(root_velocity=default_root_vel, env_ids=env_ids)
-        self.robot.write_joint_position_to_sim_index(position=joint_pos, env_ids=env_ids)
-        self.robot.write_joint_velocity_to_sim_index(velocity=joint_vel, env_ids=env_ids)
+            # Write robot state to simulation
+            self.robot.write_root_pose_to_sim_index(root_pose=default_root_pose, env_ids=env_ids)
+            self.robot.write_root_velocity_to_sim_index(root_velocity=default_root_vel, env_ids=env_ids)
+            self.robot.write_joint_position_to_sim_index(position=joint_pos, env_ids=env_ids)
+            self.robot.write_joint_velocity_to_sim_index(velocity=joint_vel, env_ids=env_ids)
 
         # Reset cloth to initial nodal positions
         env_ids_list = env_ids.cpu().tolist() if hasattr(env_ids, "cpu") else list(env_ids)

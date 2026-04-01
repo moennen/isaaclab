@@ -92,7 +92,8 @@ class PickClothEnvCfg(DirectRLEnvCfg):
     # env
     decimation = 2
     episode_length_s = 4.0
-    # obs: joint_pos(7) + joint_vel(7) + cloth_centroid(3) = 17
+    # With robot: obs = joint_pos(7) + joint_vel(7) + cloth_centroid(3) = 17, act = 7
+    # Without robot (robot_cfg=None): obs = cloth_centroid(3) = 3, act = 0
     action_space = 7
     observation_space = 17
     state_space = 0
@@ -116,9 +117,10 @@ class PickClothEnvCfg(DirectRLEnvCfg):
         replicate_physics=True,
     )
 
-    # robot
-    robot_cfg: ArticulationCfg = FRANKA_PANDA_CFG.replace(prim_path="/World/envs/env_.*/Robot")
-    # robot_cfg: ArticulationCfg = FRANKA_PANDA_HIGH_PD_CFG.replace(prim_path="/World/envs/env_.*/Robot")
+    # robot (set to None to run cloth-only without a robot)
+    robot_cfg: ArticulationCfg | None = None
+    # robot_cfg: ArticulationCfg | None = FRANKA_PANDA_CFG.replace(prim_path="/World/envs/env_.*/Robot")
+    # robot_cfg: ArticulationCfg | None = FRANKA_PANDA_HIGH_PD_CFG.replace(prim_path="/World/envs/env_.*/Robot")
 
     # joint names to control (7 arm joints, excluding fingers)
     arm_joint_names = ["panda_joint[1-7]"]
