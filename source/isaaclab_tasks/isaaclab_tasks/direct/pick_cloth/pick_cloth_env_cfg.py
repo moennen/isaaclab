@@ -99,7 +99,7 @@ class PickClothPhysicsCfg(PresetCfg):
 class PickClothEnvCfg(DirectRLEnvCfg):
     # env
     decimation = 2
-    episode_length_s = 4.0
+    episode_length_s = 5.0
     # With robot: obs = joint_pos(7) + joint_vel(7) + cloth_centroid(3) = 17, act = 7
     # Without robot (robot_cfg=None): obs = cloth_centroid(3) = 3, act = 0
     action_space = 7
@@ -165,6 +165,9 @@ class PickClothEnvCfg(DirectRLEnvCfg):
         soft_contact_ke=1e4,
         soft_contact_kd=1e-2,
     )
+
+    # interactive IK: when True, spawn a draggable sphere and solve IK each step
+    interactive_ik: bool = False
 
     # reward scales
     rew_scale_cloth_height = 5.0

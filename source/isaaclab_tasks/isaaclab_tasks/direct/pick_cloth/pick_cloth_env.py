@@ -13,11 +13,15 @@ from collections.abc import Sequence
 import torch
 import warp as wp
 
+from pxr import Gf, UsdGeom
+
 import isaaclab.sim as sim_utils
 from isaaclab.assets import Articulation
 from isaaclab.assets.deformable_object import DeformableObject
 from isaaclab.envs import DirectRLEnv
 from isaaclab.sim.spawners.from_files import GroundPlaneCfg, spawn_ground_plane
+from isaaclab.sim.spawners.shapes import SphereCfg, spawn_sphere
+from isaaclab.sim.utils.stage import get_current_stage
 
 from .pick_cloth_env_cfg import PickClothEnvCfg
 
@@ -61,8 +65,137 @@ class PickClothEnv(DirectRLEnv):
             ee_body_idx, _ = self.robot.find_bodies("panda_hand")
             self._ee_body_idx = int(ee_body_idx[0])
 
-        logger.info("PickClothEnv: has_robot=%s, control_mode=%s, action_scale=%s",
-                     self._has_robot, self.cfg.control_mode, cfg.action_scale)
+        # ------------------------------------------------------------------
+        # Optional interactive IK — Newton backend only
+        # ------------------------------------------------------------------
+        self._ik_available = False
+        if self._has_robot and cfg.interactive_ik:
+            self._setup_interactive_ik()
+
+        logger.info("PickClothEnv: has_robot=%s, control_mode=%s, action_scale=%s, interactive_ik=%s",
+                     self._has_robot, self.cfg.control_mode, cfg.action_scale, self._ik_available)
+
+    _SPHERE_PRIM_PATH = "/World/ik_target"
+
+    def _setup_interactive_ik(self):
+        """Initialize Newton IK solver and the draggable target sphere."""
+        try:
+            import newton
+            import newton.ik as ik
+            from isaaclab_newton.physics import NewtonManager
+
+            newton_model = NewtonManager._model
+            if newton_model is None:
+                logger.info("[PickClothEnv] Newton model not available; IK disabled.")
+                return
+
+            ee_body_idx, _ = self.robot.find_bodies("panda_hand")
+            self._ee_ik_index = int(ee_body_idx[0])
+
+            # Compute initial EE transform via FK
+            ik_state = newton_model.state()
+            newton.eval_fk(newton_model, newton_model.joint_q, newton_model.joint_qd, ik_state)
+            body_q_np = ik_state.body_q.numpy()
+            self._ee_tf = wp.transform(*body_q_np[self._ee_ik_index])
+            ee_pos = wp.transform_get_translation(self._ee_tf)
+
+            # IK objectives
+            self._pos_obj = ik.IKObjectivePosition(
+                link_index=self._ee_ik_index,
+                link_offset=wp.vec3(0.0, 0.0, 0.0),
+                target_positions=wp.array([ee_pos], dtype=wp.vec3),
+            )
+            self._joint_limit_obj = ik.IKObjectiveJointLimit(
+                joint_limit_lower=newton_model.joint_limit_lower,
+                joint_limit_upper=newton_model.joint_limit_upper,
+                weight=0.0,
+            )
+
+            self._ik_joint_q = wp.array(newton_model.joint_q, shape=(1, newton_model.joint_coord_count))
+            self._ik_solver = ik.IKSolver(
+                model=newton_model,
+                n_problems=1,
+                objectives=[self._pos_obj, self._joint_limit_obj],
+                jacobian_mode=ik.IKJacobianType.ANALYTIC,
+            )
+            self._newton_model = newton_model
+            self._ik_available = True
+            self._newton_viewer_gl = None  # lazily resolved in _apply_action
+            logger.info("[PickClothEnv] Newton IK initialized (EE index=%d)", self._ee_ik_index)
+
+            # Spawn IK target sphere and teleport to EE position
+            self._stage = get_current_stage()
+            spawn_sphere(
+                self._SPHERE_PRIM_PATH,
+                SphereCfg(
+                    radius=0.05,
+                    visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(1.0, 0.0, 0.0)),
+                ),
+                translation=(float(ee_pos[0]), float(ee_pos[1]), float(ee_pos[2])),
+            )
+            self._sphere_prim = self._stage.GetPrimAtPath(self._SPHERE_PRIM_PATH)
+        except Exception as exc:
+            logger.info("[PickClothEnv] IK not available: %s", exc)
+
+    def _apply_ik_action(self):
+        """Read gizmo target, solve IK, and set joint position targets."""
+        # Lazily find Newton viewer for gizmo
+        if self._newton_viewer_gl is None:
+            try:
+                from isaaclab_visualizers.newton import NewtonVisualizer
+
+                for v in self.sim.visualizers:
+                    if isinstance(v, NewtonVisualizer) and v._viewer is not None:
+                        self._newton_viewer_gl = v._viewer
+                        break
+            except Exception:
+                pass
+
+            if self._newton_viewer_gl is not None:
+                # Patch begin_frame to register the draggable gizmo each render step
+                _orig_bf = self._newton_viewer_gl.begin_frame
+                _tf = self._ee_tf
+                _viewer = self._newton_viewer_gl
+
+                def _begin_frame_with_gizmo(time, _orig=_orig_bf, _v=_viewer, _t=_tf):
+                    _orig(time)
+                    _v._gizmo_log["ik_target"] = _t
+
+                self._newton_viewer_gl.begin_frame = _begin_frame_with_gizmo
+                logger.info("[PickClothEnv] Newton viewer gizmo registered")
+            else:
+                logger.warning("[PickClothEnv] NewtonViewerGL not found in sim.visualizers")
+
+        if self._newton_viewer_gl is not None:
+            # Render a red sphere at the IK target position
+            device = self._newton_viewer_gl.device
+            target_pos_vec = wp.transform_get_translation(self._ee_tf)
+            self._newton_viewer_gl.log_points(
+                "ik_target_sphere",
+                points=wp.array([target_pos_vec], dtype=wp.vec3, device=device),
+                radii=wp.array([0.05], dtype=wp.float32, device=device),
+                colors=wp.array([wp.vec3(1.0, 0.0, 0.0)], dtype=wp.vec3, device=device),
+            )
+
+        # Sync USD sphere prim to the (possibly gizmo-updated) target position
+        target_pos = wp.transform_get_translation(self._ee_tf)
+        xform = UsdGeom.Xformable(self._sphere_prim)
+        for op in xform.GetOrderedXformOps():
+            if op.GetOpType() == UsdGeom.XformOp.TypeTranslate:
+                op.Set(Gf.Vec3d(float(target_pos[0]), float(target_pos[1]), float(target_pos[2])))
+                break
+
+        # Warm-start IK from current joint state
+        current_q = wp.to_torch(self.robot.data.joint_pos)[0]
+        ik_q_torch = wp.to_torch(self._ik_joint_q)
+        n_robot = current_q.shape[0]
+        ik_q_torch[0, :n_robot] = current_q[:n_robot]
+
+        self._pos_obj.set_target_position(0, wp.transform_get_translation(self._ee_tf))
+        self._ik_solver.step(self._ik_joint_q, self._ik_joint_q, iterations=24)
+
+        solved_arm_q = wp.to_torch(self._ik_joint_q)[0, self._arm_joint_idx]
+        self.robot.set_joint_position_target_index(target=solved_arm_q.unsqueeze(0), joint_ids=self._arm_joint_idx)
 
     def _setup_scene(self):
         # Robot (optional)
@@ -90,6 +223,9 @@ class PickClothEnv(DirectRLEnv):
 
     def _apply_action(self) -> None:
         if not self._has_robot:
+            return
+        if self._ik_available:
+            self._apply_ik_action()
             return
         if self.cfg.control_mode == "velocity":
             # Velocity control: actions are target joint velocities [rad/s]

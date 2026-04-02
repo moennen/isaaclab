@@ -260,13 +260,6 @@ class VBDSolverCfg(NewtonSolverCfg):
     Used by the AVBD rigid contact solver. Increase to make rigid contacts stiffer.
     """
 
-    soft_contact_margin: float = 0.01
-    """Soft-contact detection margin passed to the CollisionPipeline [m].
-
-    This is not a ``SolverVBD`` parameter; it is used to configure the Newton
-    ``CollisionPipeline`` that generates body–particle contacts.
-    """
-
 
 @configclass
 class CoupledSolverCfg(NewtonSolverCfg):

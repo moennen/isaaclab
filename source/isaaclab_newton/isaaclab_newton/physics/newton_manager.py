@@ -477,9 +477,6 @@ class NewtonManager(PhysicsManager):
                 cls._solver = SolverFeatherstone(cls._model, **cfg_dict)
             elif cls._solver_type == "vbd":
                 cls._use_single_state = False
-                cls._needs_collision_pipeline = True
-                soft_contact_margin = cfg_dict.pop("soft_contact_margin", 0.01)
-                cls._soft_contact_margin = soft_contact_margin
                 solver_sig = inspect.signature(SolverVBD.__init__)
                 valid_solver_args = set(solver_sig.parameters.keys()) - {"self", "model"}
                 cfg_dict = {k: v for k, v in cfg_dict.items() if k in valid_solver_args}
@@ -494,9 +491,7 @@ class NewtonManager(PhysicsManager):
                 from .coupled_solver import CoupledSolver
 
                 cls._use_single_state = False
-                cls._needs_collision_pipeline = True
-                soft_contact_margin = cfg_dict.pop("soft_contact_margin", 0.01)
-                cls._soft_contact_margin = soft_contact_margin
+                cls._soft_contact_margin = cfg_dict.pop("soft_contact_margin", 0.01)
 
                 # Extract sub-solver configs
                 rigid_solver_cfg = cfg_dict.pop("rigid_solver_cfg", {})
@@ -532,7 +527,8 @@ class NewtonManager(PhysicsManager):
                 vbd_valid = set(vbd_sig.parameters.keys()) - {"self", "model"}
                 vbd_kwargs = {k: v for k, v in vbd_cfg.items() if k in vbd_valid}
 
-                # Initialize collision pipeline before creating coupled solver
+                # Initialize collision pipeline to pass into the coupled solver
+                cls._needs_collision_pipeline = True
                 cls._initialize_contacts()
 
                 logger.info(f"Coupled: Creating CoupledSolver (rigid={rigid_solver_type}, vbd={vbd_kwargs})")
@@ -546,7 +542,6 @@ class NewtonManager(PhysicsManager):
                 )
                 # CoupledSolver owns the collision pipeline internally —
                 # disable external collide() calls in _simulate().
-                cls._needs_collision_pipeline = False
                 logger.info("Coupled: CoupledSolver created successfully")
             else:
                 raise ValueError(f"Invalid solver type: {cls._solver_type}")
@@ -566,7 +561,7 @@ class NewtonManager(PhysicsManager):
                     use_mujoco_contacts = getattr(solver_cfg, "use_mujoco_contacts", False)
                 cls._needs_collision_pipeline = not use_mujoco_contacts
             elif cls._solver_type == "coupled":
-                pass  # already configured above
+                cls._needs_collision_pipeline = False
             else:
                 cls._needs_collision_pipeline = True
 
