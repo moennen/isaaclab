@@ -65,10 +65,15 @@ class PickClothEnv(DirectRLEnv):
             ee_body_idx, _ = self.robot.find_bodies("panda_hand")
             self._ee_body_idx = int(ee_body_idx[0])
 
-        # Keyboard-triggered reset (R key in Newton viewer)
+        # Keyboard controls (Newton viewer)
         self._request_reset = False
+        self._gripper_closed = False
         self._reset_key_registered = False
         self._newton_viewer_gl = None
+
+        # Finger joint indices and limits
+        if self._has_robot:
+            self._finger_joint_idx, _ = self.robot.find_joints(["panda_finger_joint1", "panda_finger_joint2"])
 
         # ------------------------------------------------------------------
         # Optional interactive IK — Newton backend only
@@ -204,6 +209,20 @@ class PickClothEnv(DirectRLEnv):
         solved_arm_q = wp.to_torch(self._ik_joint_q)[0, self._arm_joint_idx]
         self.robot.set_joint_position_target_index(target=solved_arm_q.unsqueeze(0), joint_ids=self._arm_joint_idx)
 
+        # Finger control: closed=0.0, open=0.04 (joint limits)
+        self._apply_finger_targets()
+
+    def _apply_finger_targets(self):
+        """Set finger joint targets based on gripper state (G key toggle)."""
+        finger_pos = 0.0 if self._gripper_closed else 0.04
+        finger_target = torch.full(
+            (self.num_envs, len(self._finger_joint_idx)),
+            finger_pos,
+            dtype=torch.float32,
+            device=self.device,
+        )
+        self.robot.set_joint_position_target_index(target=finger_target, joint_ids=self._finger_joint_idx)
+
     def _try_find_viewer_for_reset_key(self):
         """Lazily find Newton viewer and register R-key reset (non-IK path)."""
         if self._reset_key_registered:
@@ -229,10 +248,13 @@ class PickClothEnv(DirectRLEnv):
             if symbol == key.R:
                 _self._request_reset = True
                 logger.info("[PickClothEnv] Reset requested via R key")
+            elif symbol == key.G:
+                _self._gripper_closed = not _self._gripper_closed
+                logger.info("[PickClothEnv] Gripper %s via G key", "closed" if _self._gripper_closed else "open")
 
         self._newton_viewer_gl.renderer.register_key_press(_on_key)
         self._reset_key_registered = True
-        logger.info("[PickClothEnv] R key registered for reset")
+        logger.info("[PickClothEnv] R key (reset) and G key (gripper toggle) registered")
 
     def _setup_scene(self):
         # Robot (optional)
@@ -276,6 +298,7 @@ class PickClothEnv(DirectRLEnv):
             # Position control: actions are offsets from default pose [rad]
             pos_targets = self._default_joint_pos[:, self._arm_joint_idx] + self.actions * self.cfg.action_scale
             self.robot.set_joint_position_target_index(target=pos_targets, joint_ids=self._arm_joint_idx)
+        self._apply_finger_targets()
 
     def _get_observations(self) -> dict:
         self.cloth.update(self.step_dt)
