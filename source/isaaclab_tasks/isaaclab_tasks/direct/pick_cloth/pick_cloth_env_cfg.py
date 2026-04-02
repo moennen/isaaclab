@@ -45,13 +45,14 @@ class PickClothPhysicsCfg(PresetCfg):
     default: NewtonCfg = NewtonCfg(
         solver_cfg=CoupledSolverCfg(
             rigid_solver_cfg=MJWarpSolverCfg(
-                njmax=21,
+                njmax=40,
                 nconmax=20,
                 ls_iterations=20,
                 cone="pyramidal",
                 impratio=1,
                 ls_parallel=False,
                 integrator="implicitfast",
+                ccd_iterations=100,
             ),
             vbd_cfg=VBDSolverCfg(
                 iterations=5,
@@ -112,7 +113,7 @@ class PickClothEnvCfg(DirectRLEnvCfg):
         render_interval=decimation,
         physics=PickClothPhysicsCfg(),
         visualizer_cfgs=NewtonVisualizerCfg(
-            camera_position=(2.0, 2.0, 2.0),
+            camera_position=(2.0, 2.0, 0.5),
             camera_target=(0.0, 0.0, 0.5),
             record_dir="",
         ),
@@ -152,7 +153,7 @@ class PickClothEnvCfg(DirectRLEnvCfg):
             visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.2, 0.2, 0.8)),
         ),
         init_state=DeformableObjectCfg.InitialStateCfg(
-            pos=(0.0, 1.25, 1.0),  # in front of robot, reachable height
+            pos=(0.8, 1.25, 0.05),  # in front of robot, reachable height
             rot=(1.0, 0.0, 0.0, 0.0),
         ),
         density=0.02,

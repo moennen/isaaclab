@@ -65,6 +65,11 @@ class PickClothEnv(DirectRLEnv):
             ee_body_idx, _ = self.robot.find_bodies("panda_hand")
             self._ee_body_idx = int(ee_body_idx[0])
 
+        # Keyboard-triggered reset (R key in Newton viewer)
+        self._request_reset = False
+        self._reset_key_registered = False
+        self._newton_viewer_gl = None
+
         # ------------------------------------------------------------------
         # Optional interactive IK — Newton backend only
         # ------------------------------------------------------------------
@@ -152,6 +157,8 @@ class PickClothEnv(DirectRLEnv):
                 pass
 
             if self._newton_viewer_gl is not None:
+                self._register_reset_key()
+
                 # Patch begin_frame to register the draggable gizmo each render step
                 _orig_bf = self._newton_viewer_gl.begin_frame
                 _tf = self._ee_tf
@@ -197,6 +204,36 @@ class PickClothEnv(DirectRLEnv):
         solved_arm_q = wp.to_torch(self._ik_joint_q)[0, self._arm_joint_idx]
         self.robot.set_joint_position_target_index(target=solved_arm_q.unsqueeze(0), joint_ids=self._arm_joint_idx)
 
+    def _try_find_viewer_for_reset_key(self):
+        """Lazily find Newton viewer and register R-key reset (non-IK path)."""
+        if self._reset_key_registered:
+            return
+        try:
+            from isaaclab_visualizers.newton import NewtonVisualizer
+
+            for v in self.sim.visualizers:
+                if isinstance(v, NewtonVisualizer) and v._viewer is not None:
+                    self._newton_viewer_gl = v._viewer
+                    self._register_reset_key()
+                    return
+        except Exception:
+            pass
+
+    def _register_reset_key(self):
+        """Register R key to trigger environment reset in Newton viewer."""
+        if self._reset_key_registered or self._newton_viewer_gl is None:
+            return
+        import pyglet.window.key as key
+
+        def _on_key(symbol, modifiers, _self=self):
+            if symbol == key.R:
+                _self._request_reset = True
+                logger.info("[PickClothEnv] Reset requested via R key")
+
+        self._newton_viewer_gl.renderer.register_key_press(_on_key)
+        self._reset_key_registered = True
+        logger.info("[PickClothEnv] R key registered for reset")
+
     def _setup_scene(self):
         # Robot (optional)
         if self._has_robot:
@@ -222,6 +259,10 @@ class PickClothEnv(DirectRLEnv):
         self.actions = actions.clone()
 
     def _apply_action(self) -> None:
+        # Lazily register R-key reset when Newton viewer is available (non-IK path)
+        if not self._reset_key_registered and not self._ik_available:
+            self._try_find_viewer_for_reset_key()
+
         if not self._has_robot:
             return
         if self._ik_available:
@@ -281,6 +322,12 @@ class PickClothEnv(DirectRLEnv):
             self.joint_vel = wp.to_torch(self.robot.data.joint_vel)
 
         time_out = self.episode_length_buf >= self.max_episode_length - 1
+
+        # R key in Newton viewer triggers reset for all envs
+        if self._request_reset:
+            time_out = torch.ones_like(time_out)
+            self._request_reset = False
+
         terminated = torch.zeros_like(time_out)
         return terminated, time_out
 
