@@ -20,7 +20,7 @@ from isaaclab_newton.physics import CoupledSolverCfg, FeatherstoneSolverCfg, MJW
 from isaaclab_visualizers.newton import NewtonVisualizerCfg
 
 from isaaclab_assets.robots.franka import FRANKA_PANDA_HIGH_PD_CFG, FRANKA_PANDA_CFG
-from isaaclab_tasks.utils import PresetCfg
+from isaaclab_tasks.utils import PresetCfg, preset
 
 # Locate shirt USD from Newton package (defer import to avoid pxr before SimulationApp).
 _newton_spec = importlib.util.find_spec("newton")
@@ -52,8 +52,9 @@ class PickClothPhysicsCfg(PresetCfg):
     """Physics presets for the Pick-Cloth environment.
 
     Presets:
-        - ``default`` / ``newton``: MuJoCo Warp rigid solver + VBD cloth (recommended).
-        - ``featherstone``: Featherstone rigid solver + VBD cloth.
+        - ``default`` / ``newton`` / ``newton_mjwarp``: MuJoCo Warp rigid solver + VBD cloth (recommended).
+        - ``newton_featherstone``: Featherstone rigid solver + VBD cloth.
+        - ``cloth_only``: VBD cloth only, no rigid-body solver.
     """
 
     default: NewtonCfg = NewtonCfg(
@@ -75,8 +76,9 @@ class PickClothPhysicsCfg(PresetCfg):
     )
 
     newton: NewtonCfg = default
+    newton_mjwarp: NewtonCfg = default
 
-    featherstone: NewtonCfg = NewtonCfg(
+    newton_featherstone: NewtonCfg = NewtonCfg(
         solver_cfg=CoupledSolverCfg(
             rigid_solver_cfg=FeatherstoneSolverCfg(),
             vbd=_VBD_CFG,
@@ -85,6 +87,7 @@ class PickClothPhysicsCfg(PresetCfg):
         num_substeps=30,
         use_cuda_graph=True,
     )
+
 
 
 @configclass
@@ -117,10 +120,12 @@ class PickClothEnvCfg(DirectRLEnvCfg):
         replicate_physics=True,
     )
 
-    # robot (set to None to run cloth-only without a robot)
-    robot_cfg: ArticulationCfg | None = None
-    # robot_cfg: ArticulationCfg | None = FRANKA_PANDA_CFG.replace(prim_path="/World/envs/env_.*/Robot")
-    # robot_cfg: ArticulationCfg | None = FRANKA_PANDA_HIGH_PD_CFG.replace(prim_path="/World/envs/env_.*/Robot")
+    # robot (use presets=cloth_only to run without a robot)
+    robot_cfg = preset(
+        default=FRANKA_PANDA_CFG.replace(prim_path="/World/envs/env_.*/Robot"),
+        franka_high_pd=FRANKA_PANDA_HIGH_PD_CFG.replace(prim_path="/World/envs/env_.*/Robot"),
+        cloth_only=None,
+    )
 
     # joint names to control (7 arm joints, excluding fingers)
     arm_joint_names = ["panda_joint[1-7]"]
