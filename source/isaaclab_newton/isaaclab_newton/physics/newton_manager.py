@@ -500,7 +500,7 @@ class NewtonManager(PhysicsManager):
 
                 # Extract sub-solver configs
                 rigid_solver_cfg = cfg_dict.pop("rigid_solver_cfg", {})
-                vbd_cfg = cfg_dict.pop("vbd", {})
+                vbd_cfg = cfg_dict.pop("vbd_cfg", {})
 
                 # Determine rigid solver type
                 if hasattr(rigid_solver_cfg, "to_dict"):

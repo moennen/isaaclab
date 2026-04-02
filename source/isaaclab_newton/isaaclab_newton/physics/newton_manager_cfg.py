@@ -287,7 +287,7 @@ class CoupledSolverCfg(NewtonSolverCfg):
     """Rigid-body sub-solver configuration. Can be :class:`MJWarpSolverCfg` or
     :class:`FeatherstoneSolverCfg`."""
 
-    vbd: VBDSolverCfg = VBDSolverCfg(integrate_with_external_rigid_solver=True)
+    vbd_cfg: VBDSolverCfg = VBDSolverCfg(integrate_with_external_rigid_solver=True)
     """VBD sub-solver configuration for cloth/particle dynamics."""
 
     soft_contact_margin: float = 0.01
