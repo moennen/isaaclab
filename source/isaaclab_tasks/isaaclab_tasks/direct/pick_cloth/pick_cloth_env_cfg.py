@@ -32,21 +32,6 @@ _SHIRT_USD = os.path.join(
 )
 
 
-_VBD_CFG = VBDSolverCfg(
-    iterations=5,
-    integrate_with_external_rigid_solver=True,
-    particle_enable_self_contact=True,
-    particle_self_contact_radius=0.002,
-    particle_self_contact_margin=0.002,
-    particle_topological_contact_filter_threshold=1,
-    particle_rest_shape_contact_exclusion_radius=0.0,
-    particle_vertex_contact_buffer_size=16,
-    particle_edge_contact_buffer_size=20,
-    particle_collision_detection_interval=-1,
-    rigid_contact_k_start=1e4,
-)
-
-
 @configclass
 class PickClothPhysicsCfg(PresetCfg):
     """Physics presets for the Pick-Cloth environment.
@@ -68,7 +53,18 @@ class PickClothPhysicsCfg(PresetCfg):
                 ls_parallel=False,
                 integrator="implicitfast",
             ),
-            vbd=_VBD_CFG,
+            vbd=VBDSolverCfg(
+                iterations=5,
+                integrate_with_external_rigid_solver=True,
+                particle_enable_self_contact=True,
+                particle_self_contact_radius=2e-3,  # good for substeps=10
+                particle_self_contact_margin=2e-3,
+                particle_topological_contact_filter_threshold=1,
+                particle_rest_shape_contact_exclusion_radius=0.0,
+                particle_vertex_contact_buffer_size=16,
+                particle_edge_contact_buffer_size=20,
+                particle_collision_detection_interval=-1,
+            ),
             soft_contact_margin=0.01,
         ),
         num_substeps=10,
@@ -81,7 +77,18 @@ class PickClothPhysicsCfg(PresetCfg):
     newton_featherstone: NewtonCfg = NewtonCfg(
         solver_cfg=CoupledSolverCfg(
             rigid_solver_cfg=FeatherstoneSolverCfg(),
-            vbd=_VBD_CFG,
+            vbd=VBDSolverCfg(
+                iterations=5,
+                integrate_with_external_rigid_solver=True,
+                particle_enable_self_contact=True,
+                particle_self_contact_radius=0.001,  # good for substeps=30
+                particle_self_contact_margin=0.001,
+                particle_topological_contact_filter_threshold=1,
+                particle_rest_shape_contact_exclusion_radius=0.0,
+                particle_vertex_contact_buffer_size=16,
+                particle_edge_contact_buffer_size=20,
+                particle_collision_detection_interval=-1,
+            ),
             soft_contact_margin=0.01,
         ),
         num_substeps=30,

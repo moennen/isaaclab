@@ -37,7 +37,7 @@ class PickClothEnv(DirectRLEnv):
 
             physics_cfg = cfg.sim.physics
             if hasattr(physics_cfg, "solver_cfg") and isinstance(physics_cfg.solver_cfg, CoupledSolverCfg):
-                physics_cfg.solver_cfg = physics_cfg.solver_cfg.vbd
+                physics_cfg.solver_cfg = physics_cfg.solver_cfg.vbd_cfg
 
         # For velocity control, override actuator gains before the robot is spawned:
         # zero stiffness (no position tracking), high damping (velocity-tracking gain).
