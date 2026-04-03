@@ -259,47 +259,81 @@ class Dexsuite3dgProxyNewtonManager(NewtonManager):
             except ImportError:
                 raise ImportError("newton.solvers.SolverVBD not found — update Newton.")
             cfg = PhysicsManager._cfg
-            cls._vbd_solver = SolverVBD(
-                cls._model,
-                iterations=cfg.vbd_iterations,
-                integrate_with_external_rigid_solver=True,
-                particle_enable_self_contact=False,
-            )
-            logger.info("[Proxy VBD] SolverVBD initialized (iterations=%d).", cfg.vbd_iterations)
 
-            # Create a dedicated CollisionPipeline + contacts buffer for particle-rigid
-            # soft contacts, following the cloth_franka example pattern.
+            # Pre-allocate pipeline + contacts buffer once (cloth_franka pattern) so
+            # the same buffer is reused every substep instead of allocating inside
+            # the CUDA graph.
             #
-            # Rationale:  model.collide() lazily creates a CollisionPipeline on first
-            # call (doing d2h copies that are illegal during CUDA graph capture) AND
-            # allocates a new Contacts buffer on every call.  By pre-allocating both
-            # here — before super().initialize_solver() captures the CUDA graph — we
-            # reuse a single buffer each substep, which is cleaner and avoids subtle
-            # issues with repeated allocations inside the captured graph.
-            #
-            # soft_contact_margin should be slightly larger than particle_radius so
-            # contacts are generated before deep penetration occurs.
+            # Compute per-env counts for the world-batched collision kernel.
+            # Particles in env N can only contact shapes in env N (different Newton
+            # worlds), so the effective kernel dim is:
+            #   particles_per_env × shapes_per_env × num_envs
+            # instead of the full cross-product which grows as num_worlds².
+            # At 4096 envs:  full = 49×4096 × 1386×4096 ≈ 1.14×10¹²  (overflow)
+            #                batched = 49 × 1386 × 4096 ≈ 278M         (safe)
+            # The same reduction applies to the SolverVBD AVBD state arrays.
+            num_envs = len(cls._per_env_particle_ranges) if cls._per_env_particle_ranges else 1
+            particles_per_env = cls._model.particle_count // max(num_envs, 1)
+            shapes_per_env = cls._model.shape_count // max(num_envs, 1)
+            vbd_soft_contact_max = min(
+                shapes_per_env * particles_per_env * num_envs,
+                2**30,
+            )
+            logger.info(
+                "[Proxy VBD] SolverVBD max_soft_contacts=%d "
+                "(shapes_per_env=%d × particles_per_env=%d × num_envs=%d).",
+                vbd_soft_contact_max,
+                shapes_per_env,
+                particles_per_env,
+                num_envs,
+            )
+
             if cls._state_0 is not None:
                 try:
                     import newton as _newton_pkg
                     soft_margin = cfg.particle_radius * 2.0
+                    # Use the world-batched CollisionPipeline so the kernel launch
+                    # dimension is particles_per_world × shapes_per_world × num_worlds
+                    # instead of the full cross-product particle_count × shape_count.
+                    # At 4096 envs the full product (49×4096 × 1386×4096 ≈ 1.14×10¹²)
+                    # overflows int32 and exceeds CUDA's max kernel launch dim, while
+                    # the batched dim (49 × 1386 × 4096 ≈ 278M) is well within limits.
                     logger.info(
                         "[Proxy VBD] Creating soft-body CollisionPipeline "
-                        "(soft_contact_margin=%.4f m)...", soft_margin
+                        "(batched: particles_per_world=%d, shapes_per_world=%d, num_worlds=%d, "
+                        "soft_contact_margin=%.4f m)...",
+                        particles_per_env,
+                        shapes_per_env,
+                        num_envs,
+                        soft_margin,
                     )
                     cls._soft_collision_pipeline = _newton_pkg.CollisionPipeline(
                         cls._model,
                         soft_contact_margin=soft_margin,
+                        particles_per_world=particles_per_env,
+                        shapes_per_world=shapes_per_env,
                     )
                     cls._soft_contacts = cls._soft_collision_pipeline.contacts()
-                    # Warm up the pipeline outside CUDA graph capture (first call does
-                    # d2h shape-type copies that are illegal inside graph capture).
+                    # Warm up the pipeline outside CUDA graph capture (first call
+                    # does d2h shape-type copies that are illegal inside capture).
                     cls._soft_collision_pipeline.collide(cls._state_0, cls._soft_contacts)
                     logger.info("[Proxy VBD] Soft-body collision pipeline ready.")
                 except Exception as exc:
                     logger.warning("[Proxy VBD] CollisionPipeline setup failed: %s", exc)
                     cls._soft_collision_pipeline = None
                     cls._soft_contacts = None
+
+            cls._vbd_solver = SolverVBD(
+                cls._model,
+                iterations=cfg.vbd_iterations,
+                integrate_with_external_rigid_solver=True,
+                particle_enable_self_contact=False,
+                max_soft_contacts=vbd_soft_contact_max,
+            )
+            logger.info(
+                "[Proxy VBD] SolverVBD initialized (iterations=%d, max_soft_contacts=%d).",
+                cfg.vbd_iterations, vbd_soft_contact_max,
+            )
 
         super().initialize_solver()  # creates rigid solver + captures CUDA graph
 
