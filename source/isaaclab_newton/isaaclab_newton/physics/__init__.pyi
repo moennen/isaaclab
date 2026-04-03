@@ -9,10 +9,11 @@ __all__ = [
     "MJWarpSolverCfg",
     "NewtonCfg",
     "NewtonManager",
+    "NewtonModelCfg",
     "NewtonSolverCfg",
     "VBDSolverCfg",
     "XPBDSolverCfg",
 ]
 
 from .newton_manager import NewtonManager
-from .newton_manager_cfg import CoupledSolverCfg, FeatherstoneSolverCfg, MJWarpSolverCfg, NewtonCfg, NewtonSolverCfg, VBDSolverCfg, XPBDSolverCfg
+from .newton_manager_cfg import CoupledSolverCfg, FeatherstoneSolverCfg, MJWarpSolverCfg, NewtonCfg, NewtonModelCfg, NewtonSolverCfg, VBDSolverCfg, XPBDSolverCfg

@@ -47,8 +47,6 @@ class DeformableRegistryEntry:
     edge_ke: float = 5.0
     edge_kd: float = 1e-2
     particle_radius: float = 0.008
-    soft_contact_ke: float = 1e4
-    soft_contact_kd: float = 1e-2
     # Tet params
     k_mu: float = 1e5
     k_lambda: float = 1e5
@@ -427,8 +425,6 @@ class DeformableObject(BaseDeformableObject):
             edge_ke=self.cfg.edge_ke,
             edge_kd=self.cfg.edge_kd,
             particle_radius=self.cfg.particle_radius,
-            soft_contact_ke=self.cfg.soft_contact_ke,
-            soft_contact_kd=self.cfg.soft_contact_kd,
             k_mu=self.cfg.k_mu,
             k_lambda=self.cfg.k_lambda,
             k_damp=self.cfg.k_damp,
@@ -545,8 +541,6 @@ class DeformableObject(BaseDeformableObject):
         if model is not None:
             if hasattr(model, "edge_rest_angle"):
                 model.edge_rest_angle.zero_()
-            model.soft_contact_ke = self.cfg.soft_contact_ke
-            model.soft_contact_kd = self.cfg.soft_contact_kd
 
         # Bind spawned mesh prims for Kit viewport updates (Kit only)
         if not SimulationManager._clone_physics_only:

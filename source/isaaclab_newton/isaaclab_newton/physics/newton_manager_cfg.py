@@ -288,6 +288,33 @@ class CoupledSolverCfg(NewtonSolverCfg):
 
 
 @configclass
+class NewtonModelCfg:
+    """Global Newton model parameters.
+
+    These parameters are applied to the ``newton.Model`` after finalization.
+    They control model-level contact behavior shared across all objects.
+    """
+
+    soft_contact_ke: float = 1.0e3
+    """Body-particle contact stiffness [N/m].
+
+    Controls how stiff the penalty force is when cloth/soft-body particles
+    contact rigid body shapes. The effective stiffness per contact is the
+    average of this value and the rigid shape's material stiffness.
+    """
+
+    soft_contact_kd: float = 1.0e-2
+    """Body-particle contact damping [N·s/m]."""
+
+    soft_contact_mu: float = 0.5
+    """Body-particle contact friction coefficient.
+
+    The effective friction per contact is ``sqrt(soft_contact_mu * shape_material_mu)``.
+    Increase for better grip (e.g. gripper picking up cloth).
+    """
+
+
+@configclass
 class NewtonCfg(PhysicsCfg):
     """Configuration for Newton physics manager.
 
@@ -311,3 +338,6 @@ class NewtonCfg(PhysicsCfg):
 
     solver_cfg: NewtonSolverCfg = MJWarpSolverCfg()
     """Solver configuration. Default is MJWarpSolverCfg()."""
+
+    model_cfg: NewtonModelCfg = NewtonModelCfg()
+    """Global model parameters (contact stiffness, friction, etc.)."""

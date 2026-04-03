@@ -301,6 +301,14 @@ class NewtonManager(PhysicsManager):
             cls._model.set_gravity(cls._gravity_vector)
             cls._model.num_envs = cls._num_envs
 
+            # Apply global model parameters from NewtonModelCfg
+            cfg = PhysicsManager._cfg
+            if cfg is not None and hasattr(cfg, "model_cfg") and cfg.model_cfg is not None:
+                model_cfg = cfg.model_cfg
+                cls._model.soft_contact_ke = float(model_cfg.soft_contact_ke)
+                cls._model.soft_contact_kd = float(model_cfg.soft_contact_kd)
+                cls._model.soft_contact_mu = float(model_cfg.soft_contact_mu)
+
         cls._state_0 = cls._model.state()
         cls._state_1 = cls._model.state()
         cls._control = cls._model.control()

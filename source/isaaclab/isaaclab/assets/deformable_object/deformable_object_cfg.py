@@ -40,12 +40,6 @@ class DeformableObjectCfg(AssetBaseCfg):
     particle_radius: float = 0.008
     """Particle radius [m] (controls rigid body–particle contact distance). Used by Newton backend only."""
 
-    soft_contact_ke: float = 1e4
-    """Body–particle contact stiffness [N/m]. Used by Newton backend only."""
-
-    soft_contact_kd: float = 1e-2
-    """Body–particle contact damping. Used by Newton backend only."""
-
     # -- Cloth (triangle surface mesh) parameters
 
     tri_ke: float = 1e4

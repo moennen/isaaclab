@@ -16,7 +16,7 @@ from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sim import SimulationCfg
 from isaaclab.sim.spawners.meshes import MeshFromFileCfg
 from isaaclab.utils import configclass
-from isaaclab_newton.physics import CoupledSolverCfg, FeatherstoneSolverCfg, MJWarpSolverCfg, NewtonCfg, VBDSolverCfg
+from isaaclab_newton.physics import CoupledSolverCfg, FeatherstoneSolverCfg, MJWarpSolverCfg, NewtonCfg, NewtonModelCfg, VBDSolverCfg
 from isaaclab_visualizers.newton import NewtonVisualizerCfg
 
 from isaaclab_assets.robots.franka import FRANKA_PANDA_HIGH_PD_CFG, FRANKA_PANDA_CFG
@@ -29,6 +29,12 @@ _SHIRT_USD = os.path.join(
     "examples",
     "assets",
     "unisex_shirt.usd",
+)
+
+MODEL_CFG = NewtonModelCfg(
+    soft_contact_ke=1e4,
+    soft_contact_kd=1e-2,
+    soft_contact_mu=0.5,
 )
 
 
@@ -67,6 +73,7 @@ class PickClothPhysicsCfg(PresetCfg):
             ),
             soft_contact_margin=0.01,
         ),
+        model_cfg=MODEL_CFG,
         num_substeps=10,
         use_cuda_graph=True,
     )
@@ -90,6 +97,7 @@ class PickClothPhysicsCfg(PresetCfg):
             ),
             soft_contact_margin=0.01,
         ),
+        model_cfg=MODEL_CFG,
         num_substeps=30,
         use_cuda_graph=True,
     )
@@ -153,7 +161,7 @@ class PickClothEnvCfg(DirectRLEnvCfg):
             visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.2, 0.2, 0.8)),
         ),
         init_state=DeformableObjectCfg.InitialStateCfg(
-            pos=(0.8, 1.25, 0.05),  # in front of robot, reachable height
+            pos=(0.9, 1.25, 0.05),  # in front of robot, reachable height
             rot=(1.0, 0.0, 0.0, 0.0),
         ),
         density=0.02,
@@ -163,8 +171,6 @@ class PickClothEnvCfg(DirectRLEnvCfg):
         edge_ke=5.0,
         edge_kd=1e-2,
         particle_radius=0.01,
-        soft_contact_ke=1e4,
-        soft_contact_kd=1e-2,
     )
 
     # interactive IK: when True, spawn a draggable sphere and solve IK each step

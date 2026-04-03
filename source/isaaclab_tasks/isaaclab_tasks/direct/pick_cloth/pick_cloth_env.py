@@ -102,6 +102,12 @@ class PickClothEnv(DirectRLEnv):
             ee_body_idx, _ = self.robot.find_bodies("panda_hand")
             self._ee_ik_index = int(ee_body_idx[0])
 
+            # Write robot default joint positions into model before FK
+            default_jpos = wp.to_torch(self.robot.data.default_joint_pos)[0]
+            joint_q_torch = wp.to_torch(newton_model.joint_q)
+            n_robot = min(default_jpos.shape[0], joint_q_torch.shape[0])
+            joint_q_torch[:n_robot] = default_jpos[:n_robot]
+
             # Compute initial EE transform via FK
             ik_state = newton_model.state()
             newton.eval_fk(newton_model, newton_model.joint_q, newton_model.joint_qd, ik_state)
@@ -110,10 +116,16 @@ class PickClothEnv(DirectRLEnv):
             ee_pos = wp.transform_get_translation(self._ee_tf)
 
             # IK objectives
+            ee_rot = wp.transform_get_rotation(self._ee_tf)
             self._pos_obj = ik.IKObjectivePosition(
                 link_index=self._ee_ik_index,
                 link_offset=wp.vec3(0.0, 0.0, 0.0),
                 target_positions=wp.array([ee_pos], dtype=wp.vec3),
+            )
+            self._rot_obj = ik.IKObjectiveRotation(
+                link_index=self._ee_ik_index,
+                link_offset_rotation=wp.quat_identity(),
+                target_rotations=wp.array([wp.vec4(ee_rot[0], ee_rot[1], ee_rot[2], ee_rot[3])], dtype=wp.vec4),
             )
             self._joint_limit_obj = ik.IKObjectiveJointLimit(
                 joint_limit_lower=newton_model.joint_limit_lower,
@@ -125,7 +137,7 @@ class PickClothEnv(DirectRLEnv):
             self._ik_solver = ik.IKSolver(
                 model=newton_model,
                 n_problems=1,
-                objectives=[self._pos_obj, self._joint_limit_obj],
+                objectives=[self._pos_obj, self._rot_obj, self._joint_limit_obj],
                 jacobian_mode=ik.IKJacobianType.ANALYTIC,
             )
             self._newton_model = newton_model
@@ -204,6 +216,8 @@ class PickClothEnv(DirectRLEnv):
         ik_q_torch[0, :n_robot] = current_q[:n_robot]
 
         self._pos_obj.set_target_position(0, wp.transform_get_translation(self._ee_tf))
+        ee_rot = wp.transform_get_rotation(self._ee_tf)
+        self._rot_obj.set_target_rotation(0, ee_rot)
         self._ik_solver.step(self._ik_joint_q, self._ik_joint_q, iterations=24)
 
         solved_arm_q = wp.to_torch(self._ik_joint_q)[0, self._arm_joint_idx]
