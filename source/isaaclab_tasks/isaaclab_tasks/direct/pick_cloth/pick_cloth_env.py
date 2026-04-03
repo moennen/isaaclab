@@ -393,6 +393,43 @@ class PickClothEnv(DirectRLEnv):
             self.robot.write_joint_position_to_sim_index(position=joint_pos, env_ids=env_ids)
             self.robot.write_joint_velocity_to_sim_index(velocity=joint_vel, env_ids=env_ids)
 
+        # Run FK so body_q matches the reset joint_q before the next simulation step.
+        self.sim.forward()
+
+        # Sync rigid-body state from state_0 to state_1 for reset envs only.
+        # VBD (with integrate_with_external_rigid_solver=True) reads body_q from state_out,
+        # which is state_1 in the first substep. Without this sync, state_1 retains the
+        # pre-reset robot pose and cloth particles see stale body contacts.
+        from isaaclab_newton.physics import NewtonManager as SimulationManager
+
+        s0 = SimulationManager.get_state_0()
+        s1 = SimulationManager.get_state_1()
+        model = SimulationManager.get_model()
+
+        if s0.body_q is not None and s1.body_q is not None:
+            bodies_per_env = model.body_count // model.world_count
+            s0_bq = wp.to_torch(s0.body_q).view(model.world_count, bodies_per_env, -1)
+            s1_bq = wp.to_torch(s1.body_q).view(model.world_count, bodies_per_env, -1)
+            s1_bq[env_ids] = s0_bq[env_ids]
+
+        if s0.body_qd is not None and s1.body_qd is not None:
+            bodies_per_env = model.body_count // model.world_count
+            s0_bqd = wp.to_torch(s0.body_qd).view(model.world_count, bodies_per_env, -1)
+            s1_bqd = wp.to_torch(s1.body_qd).view(model.world_count, bodies_per_env, -1)
+            s1_bqd[env_ids] = s0_bqd[env_ids]
+
+        if s0.joint_q is not None and s1.joint_q is not None:
+            dofs_per_env = model.joint_dof_count // model.world_count
+            s0_jq = wp.to_torch(s0.joint_q).view(model.world_count, dofs_per_env)
+            s1_jq = wp.to_torch(s1.joint_q).view(model.world_count, dofs_per_env)
+            s1_jq[env_ids] = s0_jq[env_ids]
+
+        if s0.joint_qd is not None and s1.joint_qd is not None:
+            dofs_per_env = model.joint_dof_count // model.world_count
+            s0_jqd = wp.to_torch(s0.joint_qd).view(model.world_count, dofs_per_env)
+            s1_jqd = wp.to_torch(s1.joint_qd).view(model.world_count, dofs_per_env)
+            s1_jqd[env_ids] = s0_jqd[env_ids]
+
         # Reset cloth to initial nodal positions
         env_ids_list = env_ids.cpu().tolist() if hasattr(env_ids, "cpu") else list(env_ids)
         self.cloth.reset(env_ids=env_ids_list)

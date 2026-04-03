@@ -163,7 +163,7 @@ class PickClothEnvCfg(DirectRLEnvCfg):
             visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.2, 0.2, 0.8)),
         ),
         init_state=DeformableObjectCfg.InitialStateCfg(
-            pos=(0.9, 1.25, 0.05),  # in front of robot, reachable height
+            pos=(0.9, 1.25, 0.20),  # in front of robot, reachable height
             # pos=(0.9, 1.25, 1.0),  # in front of robot, reachable height
             rot=(1.0, 0.0, 0.0, 0.0),
         ),

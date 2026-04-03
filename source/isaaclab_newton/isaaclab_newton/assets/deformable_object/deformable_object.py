@@ -181,19 +181,6 @@ class DeformableObject(BaseDeformableObject):
                     device=self.device,
                 )
 
-        # Zero VBD solver internal buffers for affected particle ranges
-        solver = SimulationManager._solver
-        if solver is not None:
-            for attr in ("particle_q_prev", "inertia", "pos_prev_collision_detection", "particle_displacements"):
-                buf = getattr(solver, attr, None)
-                if buf is not None and buf.dtype == wp.vec3f:
-                    wp.launch(
-                        scatter_zero_vel_index,
-                        dim=(num_selected, self._particles_per_body),
-                        inputs=[env_ids_wp, self._particle_offsets, self._particles_per_body],
-                        outputs=[buf],
-                        device=self.device,
-                    )
 
     def write_data_to_sim(self):
         pass
