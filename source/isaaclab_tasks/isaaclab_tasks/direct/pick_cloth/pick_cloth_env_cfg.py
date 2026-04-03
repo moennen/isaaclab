@@ -70,6 +70,7 @@ class PickClothPhysicsCfg(PresetCfg):
                 particle_vertex_contact_buffer_size=16,
                 particle_edge_contact_buffer_size=20,
                 particle_collision_detection_interval=-1,
+                integrate_with_external_rigid_solver=True,
             ),
             soft_contact_margin=0.01,
         ),
@@ -87,13 +88,14 @@ class PickClothPhysicsCfg(PresetCfg):
             vbd_cfg=VBDSolverCfg(
                 iterations=5,
                 particle_enable_self_contact=True,
-                particle_self_contact_radius=0.001,  # good for substeps=30
-                particle_self_contact_margin=0.001,
+                particle_self_contact_radius=1e-4,
+                particle_self_contact_margin=2e-3,
                 particle_topological_contact_filter_threshold=1,
                 particle_rest_shape_contact_exclusion_radius=0.0,
                 particle_vertex_contact_buffer_size=16,
                 particle_edge_contact_buffer_size=20,
                 particle_collision_detection_interval=-1,
+                integrate_with_external_rigid_solver=True,
             ),
             soft_contact_margin=0.01,
         ),
@@ -162,6 +164,7 @@ class PickClothEnvCfg(DirectRLEnvCfg):
         ),
         init_state=DeformableObjectCfg.InitialStateCfg(
             pos=(0.9, 1.25, 0.05),  # in front of robot, reachable height
+            # pos=(0.9, 1.25, 1.0),  # in front of robot, reachable height
             rot=(1.0, 0.0, 0.0, 0.0),
         ),
         density=0.02,
