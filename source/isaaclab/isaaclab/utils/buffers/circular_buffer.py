@@ -38,7 +38,9 @@ class CircularBuffer:
         self._device = device
         self._ALL_INDICES = torch.arange(batch_size, device=device)
 
-        # max length tensor for comparisons
+        # max length — kept as a plain Python int to avoid .item() syncs on every
+        # observation read, and as a tensor for GPU-side torch.minimum in current_length.
+        self._max_len_int: int = max_len
         self._max_len = torch.full((batch_size,), max_len, dtype=torch.int, device=device)
         # number of data pushes passed since the last call to :meth:`reset`
         self._num_pushes = torch.zeros(batch_size, dtype=torch.long, device=device)
@@ -65,7 +67,7 @@ class CircularBuffer:
     @property
     def max_length(self) -> int:
         """The maximum length of the ring buffer."""
-        return int(self._max_len[0].item())
+        return self._max_len_int
 
     @property
     def current_length(self) -> torch.Tensor:
@@ -133,9 +135,11 @@ class CircularBuffer:
         self._pointer = (self._pointer + 1) % self.max_length
         # add the new data to the last layer
         self._buffer[self._pointer] = data
-        # Check for batches with zero pushes and initialize all values in batch to first append
+        # Check for batches with zero pushes and initialize all values in batch to first append.
+        # Use _num_pushes directly (before increment) — no .item() sync needed: the mask
+        # is computed on GPU and used in a GPU scatter, so no D2H transfer occurs.
         is_first_push = self._num_pushes == 0
-        if torch.any(is_first_push):
+        if is_first_push.any():
             self._buffer[:, is_first_push] = data[is_first_push]
         # increment number of number of pushes for all batches
         self._num_pushes += 1
@@ -161,7 +165,7 @@ class CircularBuffer:
         if len(key) != self.batch_size:
             raise ValueError(f"The argument 'key' has length {key.shape[0]}, while expecting {self.batch_size}")
         # check if the buffer is empty
-        if torch.any(self._num_pushes == 0) or self._buffer is None:
+        if self._buffer is None or (self._num_pushes == 0).any():
             raise RuntimeError("Attempting to retrieve data on an empty circular buffer. Please append data first.")
 
         # admissible lag
