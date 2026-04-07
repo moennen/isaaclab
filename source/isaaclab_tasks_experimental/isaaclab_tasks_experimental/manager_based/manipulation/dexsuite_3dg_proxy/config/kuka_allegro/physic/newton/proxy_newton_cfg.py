@@ -134,8 +134,15 @@ class Dexsuite3dgProxyNewtonCfg(NewtonCfg):
         to ``1e-5`` and leave it there.
     """
 
-    soft_contact_mu: float = 0.8
-    """Particle-rigid friction coefficient."""
+    soft_contact_mu: float = 2.0
+    """Particle-rigid friction coefficient.
+
+    Set to 2.0 based on grasp-lift validation: the two-way coupling now feeds
+    the tangential (vertical) friction reaction back to MuJoCo ``body_f``, so
+    the joint controllers feel the load during LIFT.  At mu=0.8 the friction
+    force was insufficient to support the object weight; mu=2.0 is the
+    empirically validated minimum for a reliable lift.
+    """
 
     vbd_iterations: int = 20
     """Number of VBD Gauss-Seidel iterations per substep.
