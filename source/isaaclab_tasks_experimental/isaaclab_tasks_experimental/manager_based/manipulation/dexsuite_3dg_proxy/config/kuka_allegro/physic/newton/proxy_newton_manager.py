@@ -895,10 +895,18 @@ class Dexsuite3dgProxyNewtonManager(NewtonManager):
 
             if cls._use_single_state:
                 # Single-buffer mode: s0 == s1, both ops write in-place.
+                # state_1.particle_q is unused in this mode — repurpose it as a
+                # particle_q_prev scratch buffer so the friction coupling has
+                # access to the previous substep's particle positions.
                 cls._state_0.clear_forces()
                 if two_way:
+                    if cls._state_0.particle_q is not None:
+                        wp.copy(cls._state_1.particle_q, cls._state_0.particle_q)
                     apply_soft_body_reactions(
-                        contacts_soft, cls._state_0, cls._model, cls._soft_contact_max
+                        contacts_soft, cls._state_0, cls._model, cls._soft_contact_max,
+                        particle_q_prev=cls._state_1.particle_q,
+                        friction_epsilon=cls._vbd_solver.friction_epsilon,
+                        dt=cls._solver_dt,
                     )
                 cls._solver.step(cls._state_0, cls._state_0, cls._control, contacts_rigid, cls._solver_dt)
                 cls._vbd_solver.step(
@@ -906,9 +914,14 @@ class Dexsuite3dgProxyNewtonManager(NewtonManager):
                 )
             else:
                 # Two-buffer mode: s0 is the input state, s1 is the output state.
+                # After each swap, state_1.particle_q holds the previous substep's
+                # particle positions — pass it directly as particle_q_prev.
                 if two_way:
                     apply_soft_body_reactions(
-                        contacts_soft, cls._state_0, cls._model, cls._soft_contact_max
+                        contacts_soft, cls._state_0, cls._model, cls._soft_contact_max,
+                        particle_q_prev=cls._state_1.particle_q,
+                        friction_epsilon=cls._vbd_solver.friction_epsilon,
+                        dt=cls._solver_dt,
                     )
                 # Step 1: rigid solver reads body_f from s0, writes new state to s1.
                 cls._solver.step(cls._state_0, cls._state_1, cls._control, contacts_rigid, cls._solver_dt)
