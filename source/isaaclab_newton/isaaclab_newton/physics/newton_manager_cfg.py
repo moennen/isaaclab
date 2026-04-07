@@ -313,6 +313,30 @@ class NewtonModelCfg:
     Increase for better grip (e.g. gripper picking up cloth).
     """
 
+    shape_material_ke: float | None = None
+    """Per-shape contact stiffness override [N/m].
+
+    When set, all collision shapes in the model will have their contact
+    stiffness overwritten to this value.  If ``None`` (default), the
+    per-shape values parsed from USD/MJCF are kept.
+    """
+
+    shape_material_kd: float | None = None
+    """Per-shape contact damping override [N·s/m].
+
+    When set, all collision shapes in the model will have their contact
+    damping overwritten to this value.  If ``None`` (default), the
+    per-shape values parsed from USD/MJCF are kept.
+    """
+
+    shape_material_mu: float | None = None
+    """Per-shape friction coefficient override [dimensionless].
+
+    When set, all collision shapes in the model will have their friction
+    coefficient overwritten to this value.  If ``None`` (default), the
+    per-shape values parsed from USD/MJCF are kept.
+    """
+
 
 @configclass
 class NewtonCfg(PhysicsCfg):
