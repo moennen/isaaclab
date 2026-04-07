@@ -3,6 +3,8 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
+import os
+
 from isaaclab_newton.physics import MJWarpSolverCfg, NewtonCfg
 from isaaclab_physx.physics import PhysxCfg
 
@@ -43,6 +45,16 @@ from .camera_cfg import (
     WristTiledCameraCfg,
 )
 
+# Allow overriding the assets root for containerised deployments.
+# Default: local dev path. In Docker: set ASSETS_ROOT=/workspace/assets
+_ASSETS_ROOT = os.environ.get("ASSETS_ROOT", "/mnt/dev/isaac-newton3/assets")
+
+# Tet mesh used for VBD deformable simulation.
+# Accepts a bare filename (resolved under ASSETS_ROOT) or an absolute path.
+# Example: TET_MESH=blueHairRagdollLR.msh  or  TET_MESH=/tmp/custom_tet.usda
+_tet_mesh_raw = os.environ.get("TET_MESH", "blueHairRagdoll100k_tet.usda")
+_TET_MESH_PATH = _tet_mesh_raw if os.path.isabs(_tet_mesh_raw) else os.path.join(_ASSETS_ROOT, _tet_mesh_raw)
+
 FINGERTIP_LIST = ["index_link_3", "middle_link_3", "ring_link_3", "thumb_link_3"]
 THUMB_SENSOR = "thumb_link_3_object_s"
 FINGER_SENSORS = [f"{name}_object_s" for name in FINGERTIP_LIST if name != "thumb_link_3"]
@@ -77,8 +89,9 @@ class KukaAllegroPhysicsCfg(PresetCfg):
     )
     deformable = Dexsuite3dgProxyNewtonCfg(
         vbd_enabled=True,
-        tet_mesh_path="/mnt/dev/isaac-newton3/assets/blueHairRagdollLR.msh",
-        num_substeps=4,
+        tet_mesh_path=_TET_MESH_PATH,
+        num_substeps=3,
+        vbd_iterations=20,
         debug_mode=False,
     )
     physx = default
@@ -252,8 +265,8 @@ class Dexsuite3dgProxyKukaAllegroLiftEnvCfg_PLAY(KukaAllegroMixinCfg, dexsuite.D
 # ---------------------------------------------------------------------------
 
 # Contact threshold for particle-proximity contact detection.
-# Must match particle_radius used in Dexsuite3dgProxyNewtonCfg (default 0.005 m).
-_VBD_CONTACT_THRESHOLD = 0.01  # 2 × particle_radius
+# Must match particle_radius used in Dexsuite3dgProxyNewtonCfg (default 0.015 m).
+_VBD_CONTACT_THRESHOLD = 0.030  # 2 × particle_radius
 
 
 @configclass

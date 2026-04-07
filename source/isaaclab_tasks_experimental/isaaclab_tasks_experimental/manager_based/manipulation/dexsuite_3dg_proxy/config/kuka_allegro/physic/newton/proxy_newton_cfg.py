@@ -3,7 +3,54 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""Newton physics config that uses the extended Dexsuite 3dg Proxy manager for VBD soft bodies."""
+"""Newton physics config that uses the extended Dexsuite 3dg Proxy manager for VBD soft bodies.
+
+Physics coupling architecture: same-substep two-way coupling
+-------------------------------------------------------------
+Newton's two-solver pattern is used:
+
+  1. ``SolverMuJoCo``  — integrates the Allegro rigid body (joints, fingers).
+  2. ``SolverVBD``     — integrates only the soft-body particles
+     (``integrate_with_external_rigid_solver=True``).
+
+The coupling is **two-way within each substep**:
+
+  a. ``collide(s0, contacts)`` — detect particle-rigid contacts at current positions.
+  b. ``apply_soft_body_reactions(contacts → s0.body_f)`` — accumulate
+     equal-and-opposite contact reaction forces onto the rigid bodies using
+     ``state.body_f`` (a first-class Newton API read by ``SolverMuJoCo.step()``
+     via ``apply_mjc_body_f_kernel`` → ``xfrc_applied``).
+  c. ``MuJoCo.step(s0 → s1)`` — rigid step; reads ``body_f`` so finger joints
+     feel resistance from the soft object in the **same substep**.
+  d. ``VBD.step(s0 → s1, contacts)`` — soft step; uses the same contact buffer
+     so action and reaction are computed from identical contact geometry.
+
+This is operator-splitting (IMEX) with **zero time lag**: contacts are detected
+at ``s0`` positions and both the rigid reaction and the soft correction are
+applied simultaneously rather than iteratively.  The approximation is that
+rigid and soft corrections are sequentially applied within one substep rather
+than solved monolithically — the same approach used in every off-the-shelf
+physics engine that supports deformable-rigid coupling.
+
+Critical parameter constraint (Newton VBD internal formulation)
+---------------------------------------------------------------
+``soft_contact_kd`` and ``k_damp`` are **position-level stiffness multipliers**,
+not velocity-level damping coefficients.  The effective stiffness added per
+substep is::
+
+    stiffness = kd × ke / dt
+
+With ``ke=1e4`` and ``dt = 1 / (decimation_rate × substeps)``::
+
+    kd = 1e-5  →  stiffness ≈      50 N/m   ← stable
+    kd = 1e-2  →  stiffness ≈  50 000 N/m   ← unstable
+    kd = 100   →  stiffness ≈   5×10⁸ N/m   ← immediate VBD divergence at
+                                                first contact
+
+Keep ``soft_contact_kd`` and ``k_damp`` at ``1e-5``.  The rule of thumb
+``2*sqrt(ke * mass)`` applies only to velocity-based damping formulations, not
+to Newton's position-level scheme.
+"""
 
 from __future__ import annotations
 
@@ -48,28 +95,93 @@ class Dexsuite3dgProxyNewtonCfg(NewtonCfg):
     For near-incompressible materials set k_lambda >> k_mu (e.g. k_lambda = 10 * k_mu).
     """
 
-    k_damp: float = 1e-2
-    """Damping coefficient. Higher values damp oscillations faster but reduce realism."""
+    k_damp: float = 1e-5
+    """VBD material damping coefficient.
 
-    particle_radius: float = 0.005
+    .. warning::
+        MUST be kept near zero.  In Newton's VBD solver this is a *position-level*
+        stiffness multiplier, not a velocity-level damping coefficient.  The
+        effective stiffness it adds is ``k_damp × k_mu / dt``.  A value of
+        ``1e-2`` with ``k_mu=1e4`` and ``dt=0.002 s`` gives 50 000 N/m — enough
+        to cause VBD divergence under moderate contact loads.  Set to ``1e-5``
+        and leave it there; oscillation damping comes from ``soft_contact_kd``
+        and solver iterations, not this coefficient.
+    """
+
+    particle_radius: float = 0.015
     """Particle collision radius [m]. Controls when particles begin contact with rigid shapes.
 
     Too small: particles tunnel through fingers.
     Too large: object feels inflated / fingers cannot fully grasp.
-    Start at 0.005 m (5 mm) for a hand-sized object.
+    Default 0.015 m (~3/4 of the ~20 mm inter-particle spacing in the 100k_tet training mesh).
     """
 
     soft_contact_ke: float = 1e4
     """Particle-rigid contact stiffness [N/m]. Higher = harder contact surface."""
 
-    soft_contact_kd: float = 100.0
-    """Particle-rigid contact damping [N·s/m]. Rule of thumb: ~2*sqrt(ke * particle_mass)."""
+    soft_contact_kd: float = 1e-5
+    """Particle-rigid contact damping coefficient.
+
+    .. warning::
+        MUST be kept near zero.  In Newton's VBD solver this is a *position-level*
+        stiffness multiplier, not a physical ``N·s/m`` damping coefficient.  The
+        effective stiffness it adds is ``soft_contact_kd × soft_contact_ke / dt``.
+        A value of ``100`` with ``ke=1e4`` and ``dt=0.002 s`` gives 5×10⁸ N/m —
+        immediate VBD divergence at first particle-rigid contact.
+
+        The rule of thumb ``~2*sqrt(ke * particle_mass)`` applies only to
+        velocity-based damping formulations and does **not** apply here.  Set
+        to ``1e-5`` and leave it there.
+    """
 
     soft_contact_mu: float = 0.8
     """Particle-rigid friction coefficient."""
 
-    vbd_iterations: int = 10
-    """Number of VBD solver iterations per substep. Increase (20-30) if instabilities appear."""
+    vbd_iterations: int = 20
+    """Number of VBD Gauss-Seidel iterations per substep.
+
+    10 iterations is insufficient for convergence under multi-finger contact loads
+    and causes particle velocity explosion.  20 is the empirically validated minimum;
+    increase to 25-30 if VBD NaN is observed during policy training.
+    """
+
+    vbd_two_way_coupling: bool = True
+    """Enable same-substep two-way coupling between VBD particles and rigid bodies.
+
+    When True, :func:`apply_soft_body_reactions` accumulates equal-and-opposite
+    contact forces into ``state.body_f`` before each rigid step, so finger joints
+    feel resistance from the soft object in the same substep.
+
+    Set to False for one-way coupling (object reacts to fingers, fingers do not
+    feel the object).  Useful for debugging or ablation studies.
+    """
+
+    vbd_max_contacts_per_env: int = 400
+    """Upper bound on soft contacts per environment at any given simulation step.
+
+    Controls the VBD contact kernel launch dim and contact buffer size.
+    With 255 particles and ~49 shapes, typical contact counts are 50–200 per env;
+    400 gives comfortable headroom.  Increase if you see
+    '[Proxy VBD] soft_contact_count overflow' warnings.
+    """
+
+    vbd_shapes_per_world: int | None = None
+    """Override the number of shapes per world used for VBD contact kernels.
+    None = auto-detect from warmup (recommended first run to find the right value).
+    After the first run, check the log for '[Proxy VBD] contact shape range' and set
+    this to the reported tight value to avoid redundant kernel threads from Kuka arm
+    shapes that never contact the doll."""
+
+    vbd_max_particle_velocity: float = 10.0
+    """Maximum particle speed [m/s] allowed after each VBD iteration.
+
+    Displacements exceeding ``vbd_max_particle_velocity × dt_substep`` are scaled
+    back proportionally (direction preserved).
+
+    Prevents velocity runaway when a moving rigid body suddenly contacts many
+    particles simultaneously — the typical cause of VBD NaN explosions in
+    rigid-VBD two-way coupling.  Set to ``inf`` to disable clamping.
+    """
 
     solver_cfg: MJWarpSolverCfg = MJWarpSolverCfg(
         solver="newton",

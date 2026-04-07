@@ -81,11 +81,20 @@ def body_state_b(
     """
     body_asset: Articulation = env.scene[body_asset_cfg.name]
     base_asset: Articulation = env.scene[base_asset_cfg.name]
+    # Cache body_ids as a GPU tensor to avoid sync from fancy-indexing with a CPU list.
+    if not hasattr(body_state_b, "_body_ids_cache"):
+        body_state_b._body_ids_cache = {}
+    cache_key = (id(body_asset), id(body_asset_cfg))
+    if cache_key not in body_state_b._body_ids_cache:
+        body_state_b._body_ids_cache[cache_key] = torch.tensor(
+            body_asset_cfg.body_ids, dtype=torch.long, device=body_asset.device
+        )
+    body_ids_t = body_state_b._body_ids_cache[cache_key]
     # get world pose of bodies
-    body_pos_w = wp.to_torch(body_asset.data.body_pos_w)[:, body_asset_cfg.body_ids].view(-1, 3)
-    body_quat_w = wp.to_torch(body_asset.data.body_quat_w)[:, body_asset_cfg.body_ids].view(-1, 4)
-    body_lin_vel_w = wp.to_torch(body_asset.data.body_lin_vel_w)[:, body_asset_cfg.body_ids].view(-1, 3)
-    body_ang_vel_w = wp.to_torch(body_asset.data.body_ang_vel_w)[:, body_asset_cfg.body_ids].view(-1, 3)
+    body_pos_w = wp.to_torch(body_asset.data.body_pos_w)[:, body_ids_t].view(-1, 3)
+    body_quat_w = wp.to_torch(body_asset.data.body_quat_w)[:, body_ids_t].view(-1, 4)
+    body_lin_vel_w = wp.to_torch(body_asset.data.body_lin_vel_w)[:, body_ids_t].view(-1, 3)
+    body_ang_vel_w = wp.to_torch(body_asset.data.body_ang_vel_w)[:, body_ids_t].view(-1, 3)
     num_bodies = int(body_pos_w.shape[0] / env.num_envs)
     # get world pose of base frame
     root_pos_w = (

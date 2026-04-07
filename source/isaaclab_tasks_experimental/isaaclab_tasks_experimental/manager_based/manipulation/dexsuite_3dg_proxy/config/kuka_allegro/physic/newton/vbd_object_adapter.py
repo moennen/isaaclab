@@ -390,20 +390,29 @@ def fingers_contact_force_b_vbd(
     from isaaclab.assets import Articulation  # noqa: PLC0415
 
     robot: Articulation = env.scene[asset_cfg.name]
-    body_names: list[str] = robot.body_names
 
-    tip_ids = []
-    for name in fingertip_names:
-        matches = [i for i, n in enumerate(body_names) if n == name]
-        if not matches:
-            raise ValueError(
-                f"[VBD contact obs] Fingertip '{name}' not found in robot body_names. "
-                f"Available: {body_names}"
-            )
-        tip_ids.append(matches[0])
+    # Cache tip_ids as a GPU tensor so fancy indexing never forces a CPU↔GPU sync.
+    cache_key = (id(robot), tuple(fingertip_names))
+    if not hasattr(fingers_contact_force_b_vbd, "_tip_ids_cache"):
+        fingers_contact_force_b_vbd._tip_ids_cache = {}
+    if cache_key not in fingers_contact_force_b_vbd._tip_ids_cache:
+        body_names: list[str] = robot.body_names
+        tip_ids = []
+        for name in fingertip_names:
+            matches = [i for i, n in enumerate(body_names) if n == name]
+            if not matches:
+                raise ValueError(
+                    f"[VBD contact obs] Fingertip '{name}' not found in robot body_names. "
+                    f"Available: {body_names}"
+                )
+            tip_ids.append(matches[0])
+        fingers_contact_force_b_vbd._tip_ids_cache[cache_key] = torch.tensor(
+            tip_ids, dtype=torch.long, device=robot.device
+        )
+    tip_ids_t = fingers_contact_force_b_vbd._tip_ids_cache[cache_key]
 
     body_pos_w = wp.to_torch(robot.data.body_pos_w)              # (num_envs, num_bodies, 3)
-    tip_pos_w = body_pos_w[:, tip_ids, :].float()                # (num_envs, num_tips, 3)
+    tip_pos_w = body_pos_w[:, tip_ids_t, :].float()              # (num_envs, num_tips, 3)
 
     force_proxy = Dexsuite3dgProxyNewtonManager.get_fingertip_contact_proxy(
         tip_pos_w,

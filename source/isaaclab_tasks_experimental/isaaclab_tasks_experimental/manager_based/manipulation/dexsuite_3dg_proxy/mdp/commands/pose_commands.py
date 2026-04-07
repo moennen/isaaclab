@@ -121,8 +121,8 @@ class ObjectUniformPoseCommand(CommandTerm):
             object_root_pose_w[:, :3],
             object_root_pose_w[:, 3:7],
         )
-        self.metrics["position_error"] = torch.linalg.norm(pos_error, dim=-1)
-        self.metrics["orientation_error"] = torch.linalg.norm(rot_error, dim=-1)
+        self.metrics["position_error"] = torch.linalg.norm(pos_error, dim=-1).nan_to_num_(nan=0.0)
+        self.metrics["orientation_error"] = torch.linalg.norm(rot_error, dim=-1).nan_to_num_(nan=0.0)
 
         success_id = self.metrics["position_error"] < 0.05
         if not self.cfg.position_only:
