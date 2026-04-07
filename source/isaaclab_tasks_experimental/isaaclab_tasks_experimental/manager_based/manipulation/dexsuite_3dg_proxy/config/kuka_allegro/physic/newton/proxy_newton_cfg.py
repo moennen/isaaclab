@@ -134,14 +134,14 @@ class Dexsuite3dgProxyNewtonCfg(NewtonCfg):
         to ``1e-5`` and leave it there.
     """
 
-    soft_contact_mu: float = 2.0
+    soft_contact_mu: float = 1.5
     """Particle-rigid friction coefficient.
 
-    Set to 2.0 based on grasp-lift validation: the two-way coupling now feeds
-    the tangential (vertical) friction reaction back to MuJoCo ``body_f``, so
-    the joint controllers feel the load during LIFT.  At mu=0.8 the friction
-    force was insufficient to support the object weight; mu=2.0 is the
-    empirically validated minimum for a reliable lift.
+    Validated with the dense mesh (blueHairRagdollLR.msh) and finger kp=9 N·m/rad:
+    the full two-way coupling (normal + tangential friction reaction fed back to
+    ``body_f``) requires mu >= ~1.5 for a reliable lift against gravity.
+    At mu=0.8 (former default) the friction force was insufficient; mu=1.5 is
+    the empirically validated minimum.
     """
 
     vbd_iterations: int = 20

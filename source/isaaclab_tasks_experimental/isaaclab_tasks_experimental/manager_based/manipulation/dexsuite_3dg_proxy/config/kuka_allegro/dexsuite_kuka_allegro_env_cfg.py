@@ -45,9 +45,12 @@ from .camera_cfg import (
     WristTiledCameraCfg,
 )
 
-# Allow overriding the assets root for containerised deployments.
-# Default: local dev path. In Docker: set ASSETS_ROOT=/workspace/assets
-_ASSETS_ROOT = os.environ.get("ASSETS_ROOT", "/mnt/dev/isaac-newton3/assets")
+# Assets live in the task's own assets/ directory.
+# Override with ASSETS_ROOT env var for containerised deployments.
+_ASSETS_ROOT = os.environ.get(
+    "ASSETS_ROOT",
+    os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "..", "assets")),
+)
 
 # Tet mesh used for VBD deformable simulation.
 # Accepts a bare filename (resolved under ASSETS_ROOT) or an absolute path.

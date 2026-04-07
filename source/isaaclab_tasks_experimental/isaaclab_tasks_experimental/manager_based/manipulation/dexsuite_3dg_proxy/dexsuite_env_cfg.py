@@ -3,6 +3,7 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
+import os
 from dataclasses import MISSING
 
 from isaaclab_physx.physics import PhysxCfg
@@ -78,7 +79,7 @@ class ObjectCfg(PresetCfg):
         mass_props=sim_utils.MassPropertiesCfg(mass=0.2),
     )
     mesh = sim_utils.UsdFileCfg(
-        usd_path="/mnt/dev/isaac-newton3/assets/blueHairRagdollLR.usd",
+        usd_path=os.path.join(os.path.dirname(__file__), "assets", "blueHairRagdollLR.usd"),
         rigid_props=sim_utils.RigidBodyPropertiesCfg(
             solver_position_iteration_count=16,
             solver_velocity_iteration_count=1,
@@ -89,7 +90,7 @@ class ObjectCfg(PresetCfg):
     # Visual-only USD for deformable mode: no rigid_props / collision_props baked in.
     # Physics is handled entirely by the VBD solver in Dexsuite3dgProxyNewtonManager.
     deformable = sim_utils.UsdFileCfg(
-        usd_path="/mnt/dev/isaac-newton3/assets/blueHairRagdollLR.usd",
+        usd_path=os.path.join(os.path.dirname(__file__), "assets", "blueHairRagdollLR.usd"),
     )
     default = shapes
 

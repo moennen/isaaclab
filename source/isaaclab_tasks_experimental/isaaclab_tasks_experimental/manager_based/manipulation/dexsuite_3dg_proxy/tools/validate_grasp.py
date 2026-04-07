@@ -195,11 +195,11 @@ EXPECTED_CONTACTS: dict[str, tuple[int, int, str]] = {
 # Hold success: minimum contact count that must be reached during HOLD.
 HOLD_CONTACT_THRESHOLD = 10
 
-# Default asset paths — resolved relative to ASSETS_ROOT env var if set,
-# otherwise relative to this file's location (8 levels up = repo root / assets/).
+# Default asset paths — relative to the task's own assets/ directory.
+# Override with ASSETS_ROOT env var for containerised deployments.
 _ASSETS_ROOT = os.environ.get(
     "ASSETS_ROOT",
-    os.path.normpath(os.path.join(os.path.dirname(__file__), "../../../../../../../../assets")),
+    os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "assets")),
 )
 # blueHairRagdoll100k_tet.msh is the RL training mesh (~255 particles, 673 tets).
 # blueHairRagdollLR.msh is 5.4x denser (1386 particles) — harder to stabilise.
@@ -633,7 +633,7 @@ class Example:
                   f"m/dt²≈{7e-3/self.sim_dt**2:.0f} N/m  ke/m_dt²≈{args.soft_contact_ke/(7e-3/self.sim_dt**2):.2f}")
             print(f"[validate_grasp] Finger kp   : {args.finger_stiffness} N·m/rad  "
                   f"kd={args.finger_damping} N·m·s/rad  "
-                  f"(RL task: kp=3.0 kd=0.1 effort_limit=0.5 N·m)")
+                  f"(RL task: kp=9.0 kd=0.1 effort_limit=0.5 N·m)")
             print()
             # Log header.
             # |net F|  = norm of vector-sum of body_f (opposing forces cancel).
@@ -1380,17 +1380,15 @@ if __name__ == "__main__":
                              "because particles over-penetrate and then overcorrect with large velocities.")
     parser.add_argument("--soft-contact-kd",  type=float, default=1e-5,
                         help="Soft-contact damping. MUST stay near zero — see comment above.")
-    parser.add_argument("--soft-contact-mu",  type=float, default=2.0,
-                        help="Soft-contact friction coefficient. Default 2.0: the full two-way "
-                             "coupling (normal + friction reaction) requires mu >= ~2.0 for the "
-                             "friction force to support the object weight during LIFT.")
-    parser.add_argument("--finger-stiffness", type=float, default=3.0,
+    parser.add_argument("--soft-contact-mu",  type=float, default=1.5,
+                        help="Soft-contact friction coefficient. Default 1.5: validated with "
+                             "--dense and --finger-stiffness 9; the full two-way coupling "
+                             "(normal + friction reaction) requires mu >= ~1.5 for a reliable lift.")
+    parser.add_argument("--finger-stiffness", type=float, default=9.0,
                         help="Joint position stiffness kp [N·m/rad] for all finger DOFs. "
-                             "Default 3.0 matches the ImplicitActuatorCfg kp in kuka_allegro.py "
+                             "Default 9.0 matches the ImplicitActuatorCfg kp in kuka_allegro.py "
                              "(the actual RL training asset). Lower = more compliant fingers that "
-                             "give way under contact; higher = stiffer, more likely to cause VBD NaN. "
-                             "Try --finger-stiffness 20 to test if the grip is geometrically possible "
-                             "with stronger actuators.")
+                             "give way under contact; higher = stiffer, more likely to cause VBD NaN.")
     parser.add_argument("--finger-damping",   type=float, default=0.1,
                         help="Joint velocity damping kv [N·m·s/rad] for all finger DOFs. "
                              "Default 0.1 matches kuka_allegro.py ImplicitActuatorCfg kd.")
