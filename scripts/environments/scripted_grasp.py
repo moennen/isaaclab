@@ -171,13 +171,17 @@ def main():
                     continue
 
             # ── compute scripted target ───────────────────────────────────────
-            # Read cube position from env observations (updated each step).
-            cube_pos = wp.vec3(*raw_env._cube_pos[0].tolist())
-            ee_pos, gripper_closed, phase_name = controller.get_target(sim_time, cube_pos)
+            # Read object position from env observations (updated each step).
+            # Support both cube and cylinder envs.
+            obj_pos_tensor = getattr(raw_env, "_cube_pos", None)
+            if obj_pos_tensor is None:
+                obj_pos_tensor = raw_env._cylinder_pos
+            obj_pos = wp.vec3(*obj_pos_tensor[0].tolist())
+            ee_pos, gripper_closed, phase_name = controller.get_target(sim_time, obj_pos)
 
             if phase_name != prev_phase:
                 print(f"[scripted_grasp] t={sim_time:.2f}s  phase: {prev_phase!r} → {phase_name!r}"
-                      f"  cube={tuple(round(float(cube_pos[i]), 3) for i in range(3))}"
+                      f"  object={tuple(round(float(obj_pos[i]), 3) for i in range(3))}"
                       f"  target={tuple(round(float(ee_pos[i]), 3) for i in range(3))}"
                       f"  gripper={'closed' if gripper_closed else 'open'}")
                 prev_phase = phase_name
