@@ -286,11 +286,18 @@ class NewtonVisualizer(BaseVisualizer):
             self._model = scene_data_provider.get_newton_model()
         self._state = scene_data_provider.get_newton_state(self._env_ids)
 
+        # On virtual X servers the display has no vertical refresh;
+        # enable vsync at window creation so the swap-buffers call
+        # inserts a small delay, giving the display server time to
+        # read back each frame.
+        vsync = self._is_virtual_display()
+
         try:
             self._viewer = NewtonViewerGL(
                 width=self.cfg.window_width,
                 height=self.cfg.window_height,
                 headless=self.cfg.headless,
+                vsync=vsync,
                 metadata=metadata,
                 update_frequency=self.cfg.update_frequency,
             )
@@ -402,6 +409,26 @@ class NewtonVisualizer(BaseVisualizer):
                 self._viewer._update()
         except Exception as exc:
             logger.debug("[NewtonVisualizer] Viewer update failed: %s", exc)
+
+    @staticmethod
+    def _is_virtual_display() -> bool:
+        """Return True when running on a virtual X server (Xvnc, Xvfb, etc.)."""
+        import os
+        import subprocess
+
+        display = os.environ.get("DISPLAY", "")
+        if not display:
+            return False
+        try:
+            result = subprocess.run(
+                ["bash", "-c", "ps -eo comm,args 2>/dev/null | grep -iE 'Xvnc|Xvfb|Xdummy|Xtigervnc' | grep -v grep"],
+                capture_output=True,
+                text=True,
+                timeout=2,
+            )
+            return bool(result.stdout.strip())
+        except Exception:
+            return False
 
     def close(self) -> None:
         """Release viewer resources."""
