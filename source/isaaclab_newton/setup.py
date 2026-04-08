@@ -45,7 +45,7 @@ EXTRAS_REQUIRE = {
         "mujoco==3.5.0",
         "mujoco-warp==3.5.0.2",
         "PyOpenGL-accelerate==3.1.10",
-        "newton==1.0.0",
+        "newton @ git+https://github.com/AnkaChan/newton.git@horde/merged-vbd-perf",
     ],
 }
 
@@ -68,6 +68,7 @@ setup(
         "isaaclab_newton",
         "isaaclab_newton.assets",
         "isaaclab_newton.assets.articulation",
+        "isaaclab_newton.assets.deformable_object",
         "isaaclab_newton.assets.rigid_object",
         "isaaclab_newton.assets.rigid_object_collection",
         "isaaclab_newton.cloner",
