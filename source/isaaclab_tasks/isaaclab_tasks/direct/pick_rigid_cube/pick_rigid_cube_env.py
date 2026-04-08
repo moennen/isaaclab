@@ -126,6 +126,18 @@ class PickRigidCubeEnv(DirectRLEnv):
             self._newton_model = newton_model
             self._ik_available = True
             self._newton_viewer_gl = None
+
+            # Build a CUDA graph for the IK solver iterations so the 24-iteration
+            # Jacobian solve is replayed as a single captured kernel sequence rather
+            # than 24 individual wp.launch calls per step.
+            if "cuda" in str(NewtonManager._device):
+                with wp.ScopedCapture() as capture:
+                    self._ik_solver.step(self._ik_joint_q, self._ik_joint_q, iterations=24)
+                self._ik_graph = capture.graph
+                logger.info("[PickRigidCubeEnv] IK CUDA graph captured")
+            else:
+                self._ik_graph = None
+
             logger.info("[PickRigidCubeEnv] Newton IK initialized (EE index=%d)", self._ee_ik_index)
 
             self._stage = get_current_stage()
@@ -180,12 +192,13 @@ class PickRigidCubeEnv(DirectRLEnv):
                 colors=wp.array([wp.vec3(1.0, 0.0, 0.0)], dtype=wp.vec3, device=device),
             )
 
-        target_pos = wp.transform_get_translation(self._ee_tf)
-        xform = UsdGeom.Xformable(self._sphere_prim)
-        for op in xform.GetOrderedXformOps():
-            if op.GetOpType() == UsdGeom.XformOp.TypeTranslate:
-                op.Set(Gf.Vec3d(float(target_pos[0]), float(target_pos[1]), float(target_pos[2])))
-                break
+        if self.sim.has_gui:
+            target_pos = wp.transform_get_translation(self._ee_tf)
+            xform = UsdGeom.Xformable(self._sphere_prim)
+            for op in xform.GetOrderedXformOps():
+                if op.GetOpType() == UsdGeom.XformOp.TypeTranslate:
+                    op.Set(Gf.Vec3d(float(target_pos[0]), float(target_pos[1]), float(target_pos[2])))
+                    break
 
         current_q = wp.to_torch(self.robot.data.joint_pos)[0]
         ik_q_torch = wp.to_torch(self._ik_joint_q)
@@ -195,7 +208,10 @@ class PickRigidCubeEnv(DirectRLEnv):
         self._pos_obj.set_target_position(0, wp.transform_get_translation(self._ee_tf))
         ee_rot = wp.transform_get_rotation(self._ee_tf)
         self._rot_obj.set_target_rotation(0, ee_rot)
-        self._ik_solver.step(self._ik_joint_q, self._ik_joint_q, iterations=24)
+        if self._ik_graph is not None:
+            wp.capture_launch(self._ik_graph)
+        else:
+            self._ik_solver.step(self._ik_joint_q, self._ik_joint_q, iterations=24)
 
         solved_arm_q = wp.to_torch(self._ik_joint_q)[0, self._arm_joint_idx]
         self.robot.set_joint_position_target_index(target=solved_arm_q.unsqueeze(0), joint_ids=self._arm_joint_idx)
