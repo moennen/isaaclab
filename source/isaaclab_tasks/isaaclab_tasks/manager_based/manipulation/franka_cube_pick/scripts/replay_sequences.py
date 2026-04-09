@@ -93,18 +93,14 @@ _CUBE_HALF_SIZE  = 0.025
 _CUBE_DENSITY    = 1000.0   # kg/m³ → mass = 1000 × 0.05³ = 0.125 kg
 _CUBE_MASS       = _CUBE_DENSITY * (2 * 0.025) ** 3   # 0.125 kg
 _CUBE_FRICTION   = 2.0      # Coulomb friction coeff for cube shape
-_FINGER_FRICTION = 0.3      # Low friction on finger BOX (must match generator)
+_FINGER_FRICTION = 2.0      # Friction on finger BOX (must match generator)
 _CUBE_CONTACT_KE = 10000.0  # contact stiffness [N/m]
 
 # Finger BOX contact stiffness — must match generator (soft contacts prevent
 # lateral impulses from IK drift knocking the cube during lift)
-_FINGER_BOX_KE = 100.0
+_FINGER_BOX_KE = 500.0
 _FINGER_BOX_KD = 5.0
 
-# Grip-assist spring-damper (applied to cube after T_GRIP in reachable+success).
-# Must match generator exactly — same 3D force law applied each physics substep.
-_GRIP_K_P = 20.0    # N/m — spring to track EE in XYZ
-_GRIP_K_D = 10.0    # N·s/m — damp relative XYZ velocity
 
 
 def _find_panda_urdf() -> Path:
@@ -154,7 +150,9 @@ def build_phys_model(urdf_path: Path):
             mb.shape_collision_group[_i] = 2  # arm, hand, finger MESH shapes: group 2
 
     # Add explicit BOX collision shapes for each finger body (group 1).
-    # Geometry must match generator exactly (shelf-mode: hz=0.005, Z_c=0.043).
+    # Geometry must match generator exactly — SQUEEZE mode, wide-coverage variant.
+    # local_Z=0.027, hz=0.018, hx=0.025. See generator comments for full analysis.
+    # Z_pen ≈ 41mm > Y_pen ≈ 15mm → SAT picks Y (squeeze). Wide hx prevents cube escape.
     _cfg_fbox = newton.ModelBuilder.ShapeConfig()
     _cfg_fbox.ke = _FINGER_BOX_KE
     _cfg_fbox.kd = _FINGER_BOX_KD
@@ -162,8 +160,8 @@ def build_phys_model(urdf_path: Path):
 
     mb.add_shape_box(
         body=_left_finger_body,
-        xform=wp.transform(wp.vec3(0.0, 0.013, 0.043), wp.quat_identity()),
-        hx=0.0105, hy=0.013, hz=0.005,
+        xform=wp.transform(wp.vec3(0.0, 0.013, 0.027), wp.quat_identity()),
+        hx=0.025, hy=0.013, hz=0.018,
         cfg=_cfg_fbox,
         label="leftfinger_box",
     )
@@ -171,8 +169,8 @@ def build_phys_model(urdf_path: Path):
 
     mb.add_shape_box(
         body=_right_finger_body,
-        xform=wp.transform(wp.vec3(0.0, -0.013, 0.043), wp.quat_identity()),
-        hx=0.0105, hy=0.013, hz=0.005,
+        xform=wp.transform(wp.vec3(0.0, -0.013, 0.027), wp.quat_identity()),
+        hx=0.025, hy=0.013, hz=0.018,
         cfg=_cfg_fbox,
         label="rightfinger_box",
     )
@@ -288,16 +286,7 @@ def replay_sequence(
     prev_robot_q_replay = default_robot_q.copy()
     prev_ee_pos_replay  = None
 
-    # Grip-assist state (mirrors generate_sequences.py run_one_episode).
-    # Applied per substep whenever t >= T_GRIP for reachable+success sequences.
-    # 3D control prevents lateral decoupling from the T_GRIP wrist-rotation knock.
-    _grip_offset_xyz  = None              # cube_pos - ee_pos at T_GRIP (3D)
-    _prev_cube_vel_xyz = np.zeros(3, dtype=np.float32)
-    _prev_ee_xyz      = None
-    _prev_ee_xyz_now  = None   # EE XYZ from previous substep (reused to avoid extra FK sync)
-    _grip_force_np    = np.zeros((phys_model.body_count, 6), dtype=np.float32)
-    cube_pos_arr      = np.array([cx, cy, cz], dtype=np.float32)  # live cube position
-    _prev_cube_z      = np.array([cx, cy, cz], dtype=np.float32)  # for position-based cube vel estimation
+    cube_pos_arr = np.array([cx, cy, cz], dtype=np.float32)  # live cube position (updated each substep)
 
     for frame_idx, frame in enumerate(frames):
         # Pad 9-element robot command to 16-element for phys_model
@@ -312,31 +301,7 @@ def replay_sequence(
 
         body_q = None   # will hold the last body_q after the substep loop
         for substep in range(SUBSTEPS_PER_FRAME):
-            t_substep = t_frame + substep * dt
-
             state_0.clear_forces()
-
-            # ---- Grip-assist body force (reachable+success only) ------------
-            # EE XYZ reuses the post-step value from the previous substep — state is
-            # unchanged between substeps, so this is exact and avoids an extra FK sync.
-            if is_reachable and is_success and t_substep >= T_GRIP and _prev_ee_xyz_now is not None:
-                ee_xyz_now = _prev_ee_xyz_now
-
-                if _grip_offset_xyz is None:
-                    _grip_offset_xyz = cube_pos_arr - ee_xyz_now
-                    _prev_ee_xyz     = ee_xyz_now
-
-                target_cube_pos = ee_xyz_now + _grip_offset_xyz
-                pos_err         = target_cube_pos - cube_pos_arr
-                ee_vel  = (ee_xyz_now - _prev_ee_xyz) / dt if _prev_ee_xyz is not None else np.zeros(3, dtype=np.float32)
-                vel_err = ee_vel - _prev_cube_vel_xyz
-
-                F = _GRIP_K_P * pos_err + _GRIP_K_D * vel_err
-                F[2] += _CUBE_MASS * 9.81  # gravity compensation in Z only
-                _grip_force_np[:] = 0.0
-                _grip_force_np[cube_body_idx, :3] = F
-                state_0.body_f.assign(_grip_force_np)
-                _prev_ee_xyz = ee_xyz_now
 
             if contacts is not None:
                 solver.step(state_0, state_1, control, contacts, dt)
@@ -344,14 +309,10 @@ def replay_sequence(
                 solver.step(state_0, state_1, control, None, dt)
             state_0, state_1 = state_1, state_0
 
-            # Update live cube position and velocity for next substep / grip-assist.
-            # Cube vel from position difference — avoids a joint_qd.numpy() sync.
+            # Update live cube position and EE for reward computation.
             newton.eval_fk(phys_model, state_0.joint_q, state_0.joint_qd, state_0)
-            body_q        = state_0.body_q.numpy()
-            cube_pos_arr  = np.array(body_q[cube_body_idx][:3], dtype=np.float32)
-            _prev_cube_vel_xyz = (cube_pos_arr - _prev_cube_z) / dt
-            _prev_cube_z       = cube_pos_arr.copy()
-            _prev_ee_xyz_now   = np.array(body_q[hand_idx][:3], dtype=np.float32)   # EE XYZ for next substep
+            body_q       = state_0.body_q.numpy()
+            cube_pos_arr = np.array(body_q[cube_body_idx][:3], dtype=np.float32)
 
         # body_q already up to date from the last substep FK call above
         ee_pos_list  = body_q[hand_idx][:3].tolist()

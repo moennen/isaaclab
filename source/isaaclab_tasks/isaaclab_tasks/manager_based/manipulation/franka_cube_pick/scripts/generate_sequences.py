@@ -58,7 +58,7 @@ import newton.ik as nik
 sys.path.insert(0, str(Path(__file__).parent))
 from _common.sampling import sample_cube_pos, sample_label
 from _common.sequence_schema import DEFAULT_CONFIG, label_description, save_sequences
-from _common.waypoint_ik import WaypointStateMachine, T_GRIP
+from _common.waypoint_ik import WaypointStateMachine, T_GRASP, T_GRIP, T_LIFT
 
 _TASK_ROOT  = Path(__file__).parent.parent
 _OUTPUTS_DIR = _TASK_ROOT / "data" / "validation"
@@ -103,13 +103,13 @@ _ARM_KD    = [50,  50,  50,  50,  30,  25,  15]
 _FINGER_KE = [200, 200]  # PD joint stiffness for finger prismatic joints.
 _FINGER_KD = [20,  20]
 
-# Finger BOX contact stiffness — deliberately soft (100 N/m) so that the
-# 10 mm Z-overlap at grasp only produces ~2 N normal force per finger.
-# Hard contacts (10000 N/m) create 100 N+ forces; any millimetre of IK
-# lateral drift during lift then generates >200 N sideways impulse that
-# launches the cube.  A grip-assist body force (applied in run_one_episode)
-# compensates for the reduced contact lift capacity.
-_FINGER_BOX_KE = 100.0
+# Finger BOX contact stiffness.
+# Z-overlap at grasp ≈ 10 mm per finger. Normal force per finger = ke * overlap.
+# Required lift force: m*(g + v/dt) = 0.125*(9.81 + 0.35/0.02) ≈ 3.4 N total
+# → ke=100 gives 100*0.010*2 = 2 N < 3.4 N (INSUFFICIENT).
+# → ke=500 gives 500*0.010*2 = 10 N >> 3.4 N (sufficient).
+# Risk: lateral impulse from 3mm centering error ≈ 500*0.003*mu=2 ≈ 3 N (acceptable).
+_FINGER_BOX_KE = 500.0
 _FINGER_BOX_KD = 5.0
 
 # Finger open/close positions [m]
@@ -124,20 +124,9 @@ _CUBE_HALF_SIZE  = 0.025    # half-extent per axis [m] → 5 cm cube
 _CUBE_DENSITY    = 1000.0  # kg/m³ → mass = 1000 × 0.05³ = 0.125 kg (125 g)
 _CUBE_MASS       = _CUBE_DENSITY * (2 * 0.025) ** 3   # 0.125 kg
 _CUBE_FRICTION   = 2.0      # Coulomb friction coeff for cube shape (floor contact)
-_FINGER_FRICTION = 0.3      # Low friction on finger BOX: prevents lateral knock from IK drift
+_FINGER_FRICTION = 2.0      # Friction on finger BOX: must be high enough to grip cube during transport
 _CUBE_CONTACT_KE = 10000.0  # contact stiffness [N/m] for cube-floor (keep stiff for stability)
 
-# Grip-assist body force (applied to cube after T_GRIP in reachable+success episodes).
-# Models the grip forces that real contact would provide, without the lateral
-# instability of stiff BOX-BOX contacts (ke=10000 + µ=2.0 → 200 N+ lateral forces).
-# 3D spring-damper: F = _GRIP_K_P * (target_pos - cube_pos) + _GRIP_K_D * (ee_vel - cube_vel)
-#                   F[Z] += m*g  (gravity compensation in Z only)
-# Stability: k_p * dt / m must be < 2 for semi-implicit Euler. With dt=0.02s, m=0.125kg:
-# k_p_max ≈ 2*m/dt = 12.5 N/m (explicit limit); Newton's implicit solver allows ~5-10×
-# higher → k_p=20 gives ratio=3.2 (stable), tracks position error with τ≈0.25s.
-# 3D control prevents cube from flying off laterally after the T_GRIP wrist-rotation knock.
-_GRIP_K_P = 20.0    # N/m — spring to track EE in XYZ
-_GRIP_K_D = 10.0    # N·s/m — damp relative XYZ velocity
 
 
 def build_models(urdf_path: Path):
@@ -209,38 +198,50 @@ def build_models(urdf_path: Path):
     _cfg_fbox.kd = _FINGER_BOX_KD
     _cfg_fbox.mu = _FINGER_FRICTION   # contact friction with cube = min(_FINGER_FRICTION, _CUBE_FRICTION)
 
-    # Finger BOX geometry — "shelf" mode: Z overlap < Y overlap so SAT picks
-    # Z as the contact normal axis, giving a direct upward mechanical force on
-    # the cube instead of relying on friction alone.
+    # Finger BOX geometry — SQUEEZE mode, wide-coverage variant.
     #
-    # Z_c = 0.043 m, hz = 0.005 m  (BOX center 8 mm above floor at grasp EE_z≈0.109 m)
-    # With GRASP_QUAT (Z_hand → −Z_world) and finger joint at EE_z − 0.058 m:
-    #   BOX center world Z = EE_z − 0.101 m
-    #   BOX top            = EE_z − 0.096 m  → at EE_z=0.109: 0.013 m (37 mm below cube top) ✓
-    #   BOX bottom         = EE_z − 0.106 m  → at EE_z=0.109: 0.003 m (3 mm above floor) ✓
+    # Coordinate frame: GRASP_QUAT (180° around X) maps local_Z→world −Z, local_Y→world −Y.
+    # Finger origin in world = hand_pos + [0, ∓q, −0.0584]  (left:−Y when q>0, right:+Y)
     #
-    # Z overlap with cube (cube half=0.025, centered at 0.025 m):
-    #   overlap_Z = hz + 0.025 − |BOX_Z − cube_Z| = 0.005 + 0.025 − 0.017 = 0.013 m (13 mm)
-    # Y overlap (finger penetrates cube face by ~16 mm):
-    #   overlap_Y ≈ 0.016 m (16 mm)
+    # Design goals:
+    #   1. SAT contact axis = Y (squeeze), NOT Z (shelf). Requires Z_pen > Y_pen.
+    #   2. Squeeze mode maintained even when arm drifts ±50mm in XY during lift.
+    #   3. BOX bottom stays above floor (group 1 floor will register BOX-floor contacts).
     #
-    # 13 mm < 16 mm → SAT picks Z as contact normal → upward +Z normal force on cube.
-    # Cube mechanically rests on the BOX (shelf effect). As arm lifts, cube rises with it.
-    # Z overlap is maintained as long as cube tracks arm (EE−cube < 0.131 m).
+    # Key parameters:
+    #   local_Z = 0.027 m  → BOX_center_Z = EE_Z − 0.0584 − 0.027 = EE_Z − 0.0854
+    #   At EE_Z = 0.110 m (actual grasp): BOX_center_Z = 0.0246 m ≈ cube_Z (0.023 m)
+    #   hz     = 0.018 m  → BOX_bottom at EE=0.105 m: 0.105−0.0584−0.027−0.018=0.0016 m ✓
+    #   hx     = 0.025 m  → covers cube half-width; cube can drift ±50 mm in X (vs ±36 mm
+    #                        with hx=0.0105) before X-contact is lost during lift.
+    #
+    # SAT penetration at actual grasp (EE=0.110 m, q=0.010 m, cube centred):
+    #   Z: (hz + cube_hz) − |BOX_Z − cube_Z| = (0.018+0.025) − 0.0016 = 41.4 mm
+    #   Y: (hy + cube_hy) − |BOX_Y − cube_Y| = (0.013+0.025) − 0.013  = 15.0 mm  ← minimum
+    #   X: (hx + cube_hx) − 0               = (0.025+0.025)            = 50.0 mm
+    #
+    # 15 mm < 41 mm < 50 mm → SAT picks Y (minimum) → SQUEEZE contact ✓
+    #
+    # Squeeze normal force (Y direction) × μ_friction in Z lifts the cube.
+    # Wide hx ensures squeeze contact persists even when the cube drifts in X/Y
+    # due to arm kinematic coupling during lift, preventing cube escape.
+    #
+    # Contact onset: Y overlap appears only when q < 0.025 m (cube half-width) → no
+    # spurious contact during open-finger approach phase. ✓
     mb_phys.add_shape_box(
         body=_left_finger_body,
-        xform=wp.transform(wp.vec3(0.0, 0.013, 0.043), wp.quat_identity()),
-        hx=0.0105, hy=0.013, hz=0.005,
+        xform=wp.transform(wp.vec3(0.0, 0.013, 0.027), wp.quat_identity()),
+        hx=0.025, hy=0.013, hz=0.018,
         cfg=_cfg_fbox,
         label="leftfinger_box",
     )
     mb_phys.shape_collision_group[len(mb_phys.shape_body) - 1] = 1
 
-    # Right finger: same geometry, Y-negated
+    # Right finger: same geometry, Y-negated (right_finger local Y → world +Y)
     mb_phys.add_shape_box(
         body=_right_finger_body,
-        xform=wp.transform(wp.vec3(0.0, -0.013, 0.043), wp.quat_identity()),
-        hx=0.0105, hy=0.013, hz=0.005,
+        xform=wp.transform(wp.vec3(0.0, -0.013, 0.027), wp.quat_identity()),
+        hx=0.025, hy=0.013, hz=0.018,
         cfg=_cfg_fbox,
         label="rightfinger_box",
     )
@@ -536,24 +537,30 @@ def run_one_episode(
     prev_ee_pos    = None
     # Live cube position (updated from physics each step).
     cube_pos_arr = cube_init_arr.copy()
-    _prev_cube_z = cube_init_arr.copy()   # for position-based cube vel estimation (avoids joint_qd sync)
+
+    # Arm-freeze: for reachable+success, once the gripper starts closing (t >= T_GRASP)
+    # the arm joint cmd is frozen at the last IK solution. This prevents small IK
+    # variations from creating arm XY motion that, via friction, drags the cube sideways
+    # and moves it outside the finger BOX contact zone before lift.
+    _frozen_arm_q = None   # (7,) array, set once at T_GRASP
+
+    # XYZ-freeze during lift: at T_GRIP the waypoint returns grasp_pos_Z (0.105m) but the
+    # actual EE is at ~0.110m. This 5mm downward IK target causes the arm to jerk DOWN,
+    # and the XY retargeting (cube_init.XY vs actual EE.XY, typically 5-10mm off) causes
+    # lateral impulses. Both effects transmit through high-friction Y-squeeze contact and
+    # fling the cube sideways.
+    # Fix: at T_GRIP, capture the actual EE position (prev_ee_pos) and use it as the
+    # starting point for a smooth Z-only lift interpolation. The IK target at T_GRIP is
+    # EXACTLY the current EE position (zero transient). Over [T_GRIP, T_LIFT], the IK
+    # target Z slowly increases to lift_ee_target_z=0.65m (same ease-in as the waypoint).
+    _lift_ee_xy = None     # [x, y] captured from prev_ee_pos at T_GRIP
+    _lift_ee_z0 = None     # EE Z at T_GRIP (actual, not waypoint) — lift starts from here
 
     frames = []
 
-    # Diagnostic: track cube knock events (cube moves >5cm in one step)
+    # Diagnostic: track cube knock events (cube moves >1cm in one step)
     _prev_cube_pos = cube_init_arr.copy()
     _knock_logged  = False
-
-    # Grip-assist body force (reachable+success only).
-    # Records EE-cube offset at T_GRIP, then applies a 3D spring-damper force to
-    # the cube body at each subsequent step so it tracks the EE in XYZ.
-    # This replaces hard BOX-BOX contact lift (which is numerically unstable
-    # with ke=100 N/m soft contacts + lateral IK drift during lift).
-    # 3D control prevents lateral decoupling from the T_GRIP wrist-rotation knock.
-    _grip_offset_xyz  = None              # cube_pos - ee_pos at T_GRIP (3D)
-    _prev_cube_vel_xyz = np.zeros(3, dtype=np.float32)
-    _prev_ee_xyz      = None
-    _grip_force_np    = np.zeros((phys_model.body_count, 6), dtype=np.float32)
 
     for step in range(steps_per_ep):
         t = step * dt
@@ -563,18 +570,34 @@ def run_one_episode(
         ee_target = ee_pos_t.tolist()
         quat_wxyz = quat.tolist()   # [w, x, y, z]
 
+        # ---- XY-freeze during lift (reachable+success, T_GRIP ≤ t < T_LIFT) -----
+        # At T_GRIP, capture the EE XY from the LAST FROZEN step (prev_ee_pos is the
+        # EE position after the previous physics step = the final arm-frozen position).
+        # Thereafter override the IK target XY to this frozen value so the arm only
+        # moves in Z during lift. The cube is lifted by Z-direction friction from the
+        # Y-squeeze contact. Without this fix: the lift IK retargets to cube_init.XY
+        # (5-10 mm from current EE XY) → 27mm cube X displacement via friction.
+        if label["reachable"] and label["success"]:
+            if t >= T_GRIP and _lift_ee_xy is None and prev_ee_pos is not None:
+                _lift_ee_xy = [float(prev_ee_pos[0]), float(prev_ee_pos[1])]
+                _lift_ee_z0 = float(prev_ee_pos[2])
+            if _lift_ee_xy is not None and t < T_LIFT:
+                alpha = (t - T_GRIP) / (T_LIFT - T_GRIP)
+                slow_alpha = alpha * alpha   # ease-in matching waypoint
+                lift_target_z = cfg.get("lift_ee_target_z", 0.65)
+                target_z = _lift_ee_z0 + slow_alpha * (lift_target_z - _lift_ee_z0)
+                ee_target = [_lift_ee_xy[0], _lift_ee_xy[1], target_z]
+
         # IK on robot-only model, warm-started from current robot joints.
         # robot_q_after from the previous step == pre-step joints of this step
         # (no state change between iterations), so reuse it without a second sync.
         robot_q_now   = robot_q_after
         joint_pos_cmd = solve_ik_single(ik_model, hand_idx, ee_target, robot_q_now, quat_wxyz)
 
-        # ---- Finger centering correction (reachable+success, grasp approach) ---
-        # When the IK places the EE within 0.25 m of the CURRENT cube position,
-        # shift the EE target to centre the cube between the fingers (hand-Y axis),
-        # then re-solve IK from the current solution as warm start.
-        # Uses the live cube position so small finger-induced nudges are accounted for.
-        if label["reachable"] and label["success"]:
+        # ---- Finger centering correction (reachable+success, approach only) ---
+        # Applied only while the EE is approaching (t < T_GRASP). Once the gripper
+        # starts closing, the arm is frozen — see arm-freeze logic below.
+        if label["reachable"] and label["success"] and t < T_GRASP:
             ee_arr = np.array(ee_target, dtype=np.float32)
             ee_dist = float(np.linalg.norm(ee_arr - cube_pos_arr))
             if ee_dist < 0.25:
@@ -588,6 +611,19 @@ def run_one_episode(
                     joint_pos_cmd = solve_ik_single(
                         ik_model, hand_idx, corrected_target, joint_pos_cmd, None
                     )
+
+        # ---- Arm freeze during gripper closing (reachable+success) -------------
+        # From T_GRASP (fingers start closing) to T_GRIP (fully closed), freeze the
+        # arm at the IK solution captured just as closing begins. This prevents
+        # per-step IK variation from creating small arm XY movements that drag the
+        # cube sideways via friction (which would move the cube out of grip range).
+        if label["reachable"] and label["success"]:
+            if t >= T_GRASP and _frozen_arm_q is None:
+                # Capture current arm solution the first time T_GRASP is crossed.
+                _frozen_arm_q = joint_pos_cmd[:7].copy()
+            if _frozen_arm_q is not None and t < T_GRIP:
+                # Hold arm fixed; only finger positions advance.
+                joint_pos_cmd[:7] = _frozen_arm_q
 
         joint_pos_cmd[7] = finger_cmd
         joint_pos_cmd[8] = finger_cmd
@@ -604,39 +640,6 @@ def run_one_episode(
         # Physics step
         state_0.clear_forces()
 
-        # ---- Grip-assist body force (reachable+success only) ----------------
-        # At T_GRIP, record the cube-EE Z offset (the "grasp offset").
-        # Each subsequent step: apply a Z-only spring-damper body force to the
-        # cube so it tracks the EE vertically.  Only Z is controlled here;
-        # 3D lateral+vertical control is handled by the grip-assist spring-damper.
-        #
-        # EE pos reuses prev_ee_pos from the post-step FK of the previous iteration.
-        # The state is unchanged between post-step N−1 and pre-step N, so
-        # this is exact (no approximation), saving one eval_fk + body_q.numpy() sync.
-        if label["reachable"] and label["success"] and t >= T_GRIP and prev_ee_pos is not None:
-            ee_xyz_now = np.array([prev_ee_pos[0], prev_ee_pos[1], prev_ee_pos[2]], dtype=np.float32)
-
-            if _grip_offset_xyz is None:
-                # First step at/after T_GRIP: record the 3D EE-cube offset
-                _grip_offset_xyz = cube_pos_arr - ee_xyz_now
-                _prev_ee_xyz     = ee_xyz_now
-
-            # Target cube pos = EE pos + recorded offset
-            target_cube_pos = ee_xyz_now + _grip_offset_xyz
-            pos_err         = target_cube_pos - cube_pos_arr
-
-            # EE and cube velocity from position differences (avoids joint_qd.numpy() sync)
-            ee_vel  = (ee_xyz_now - _prev_ee_xyz) / dt if _prev_ee_xyz is not None else np.zeros(3, dtype=np.float32)
-            vel_err = ee_vel - _prev_cube_vel_xyz
-
-            F = _GRIP_K_P * pos_err + _GRIP_K_D * vel_err
-            F[2] += _CUBE_MASS * 9.81  # gravity compensation in Z only
-            _grip_force_np[:] = 0.0
-            _grip_force_np[cube_body_idx, :3] = F
-            state_0.body_f.assign(_grip_force_np)
-
-            _prev_ee_xyz = ee_xyz_now
-
         if contacts is not None:
             solver.step(state_0, state_1, control, contacts, dt)
         else:
@@ -646,23 +649,19 @@ def run_one_episode(
         # FK → read actual EE + cube positions from body transforms
         newton.eval_fk(phys_model, state_0.joint_q, state_0.joint_qd, state_0)
         body_q = state_0.body_q.numpy()
-        ee_pos_now  = body_q[hand_idx][:3].tolist()
+        ee_pos_now   = body_q[hand_idx][:3].tolist()
         cube_pos_now = body_q[cube_body_idx][:3].tolist()
 
         # ---- Cube knock diagnostic ------------------------------------------------
         cube_pos_arr_now = np.array(cube_pos_now, dtype=np.float32)
         cube_delta = float(np.linalg.norm(cube_pos_arr_now - _prev_cube_pos))
         if cube_delta > 0.01 and not _knock_logged:   # >1cm displacement in one step
-            # Cube velocity (constraint impulse encoded as velocity change)
-            all_qd = state_0.joint_qd.numpy()
-            cube_vel = all_qd[_N_ROBOT_JOINTS:_N_ROBOT_JOINTS + 3]   # [vx, vy, vz]
-            # Finger joint positions (to check asymmetric closure)
-            all_q = state_0.joint_q.numpy()
-            f1, f2 = float(all_q[7]), float(all_q[8])   # finger1, finger2 positions [m]
-            ee_arr = np.array(ee_pos_now, dtype=np.float32)
-            cube_arr = cube_pos_arr_now
-            # Displacement vector: which direction did cube move
-            disp = cube_arr - _prev_cube_pos
+            all_qd   = state_0.joint_qd.numpy()
+            cube_vel = all_qd[_N_ROBOT_JOINTS:_N_ROBOT_JOINTS + 3]
+            all_q    = state_0.joint_q.numpy()
+            f1, f2   = float(all_q[7]), float(all_q[8])
+            ee_arr   = np.array(ee_pos_now, dtype=np.float32)
+            disp     = cube_pos_arr_now - _prev_cube_pos
             print(
                 f"\n    [KNOCK] {seq_id} t={t:.3f}s  cube_delta={cube_delta*100:.1f}cm"
                 f"\n      cube_init=[{cube_init_arr[0]:.4f},{cube_init_arr[1]:.4f},{cube_init_arr[2]:.4f}]"
@@ -670,7 +669,7 @@ def run_one_episode(
                 f"\n      displacement=[{disp[0]:.4f},{disp[1]:.4f},{disp[2]:.4f}]m"
                 f"  cube_vel=[{cube_vel[0]:.3f},{cube_vel[1]:.3f},{cube_vel[2]:.3f}]m/s"
                 f"\n      ee_pos=[{ee_arr[0]:.4f},{ee_arr[1]:.4f},{ee_arr[2]:.4f}]"
-                f"  cube-ee=[{(cube_arr-ee_arr)[0]:.4f},{(cube_arr-ee_arr)[1]:.4f},{(cube_arr-ee_arr)[2]:.4f}]"
+                f"  cube-ee=[{(cube_pos_arr_now-ee_arr)[0]:.4f},{(cube_pos_arr_now-ee_arr)[1]:.4f},{(cube_pos_arr_now-ee_arr)[2]:.4f}]"
                 f"\n      fingers: f1={f1:.4f}m  f2={f2:.4f}m  (cmd={finger_cmd:.4f}m)"
                 f"  arm[6]={float(all_q[6]):.4f}rad\n"
             )
@@ -694,13 +693,21 @@ def run_one_episode(
                 "cube_pos_w":     cube_pos_now,
             })
 
+        # ---- Lift-phase Z diagnostic (every 0.5s during T_GRIP→end) -----------
+        if label["reachable"] and label["success"] and t >= T_GRIP and step % 25 == 0:
+            _all_q   = state_0.joint_q.numpy()
+            _f1      = float(_all_q[7])
+            _f2      = float(_all_q[8])
+            _box_z_left  = float(ee_pos_now[1] if False else ee_pos_now[2]) - 0.0854
+            print(
+                f"    [LIFT t={t:.2f}s] ee_z={ee_pos_now[2]:.4f}m  cube_z={cube_pos_now[2]:.4f}m"
+                f"  fingers=({_f1:.4f},{_f2:.4f})m  ee_xy=({ee_pos_now[0]:.4f},{ee_pos_now[1]:.4f})"
+                f"  cube_xy=({cube_pos_now[0]:.4f},{cube_pos_now[1]:.4f})"
+            )
+
         prev_robot_q = robot_q_after.copy()
         prev_ee_pos  = ee_pos_now
-        cube_pos_arr = cube_pos_arr_now  # update live cube position from physics
-        # Cube XYZ velocity from position difference — avoids a joint_qd.numpy() sync.
-        # Sufficient for the soft grip-assist spring (k_p=20, dt=0.02).
-        _prev_cube_vel_xyz = (cube_pos_arr - _prev_cube_z) / dt
-        _prev_cube_z       = cube_pos_arr.copy()
+        cube_pos_arr = cube_pos_arr_now
 
     return {
         "id":                   seq_id,
