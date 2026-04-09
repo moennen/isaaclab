@@ -316,24 +316,24 @@ class CoupledSolver:
         """Advance rigid bodies with the configured sub-solver."""
         model = self._model
 
-        if self._is_featherstone:
+        # if self._is_featherstone:
             # Mask particles so Featherstone only integrates rigid bodies.
             # With particle_count=0, all particle-related kernels (spring,
             # triangle, bending, tet, contact) are skipped, including
             # integrate_particles(). Gravity is left enabled so rigid bodies
             # feel their own weight during the CRBA solve.
-            saved_particle_count = model.particle_count
-            saved_shape_contact_pair_count = model.shape_contact_pair_count
-            model.particle_count = 0
-            model.shape_contact_pair_count = 0
+        saved_particle_count = model.particle_count
+        # saved_shape_contact_pair_count = model.shape_contact_pair_count
+        model.particle_count = 0
+        # model.shape_contact_pair_count = 0
 
-            self.rigid_solver.step(state_in, state_out, control, None, dt)
+        self.rigid_solver.step(state_in, state_out, control, None, dt)
 
-            model.particle_count = saved_particle_count
-            model.shape_contact_pair_count = saved_shape_contact_pair_count
-        else:
-            # MuJoCo: operates on its own internal model; no particle masking needed.
-            self.rigid_solver.step(state_in, state_in, control, None, dt)
+        model.particle_count = saved_particle_count
+        # model.shape_contact_pair_count = saved_shape_contact_pair_count
+        # else:
+        #     # MuJoCo: operates on its own internal model; no particle masking needed.
+        #     self.rigid_solver.step(state_in, state_in, control, None, dt)
 
     def _apply_reactions(self, state: State, dt: float) -> None:
         """Launch the reaction kernel to inject normal + friction forces into body_f."""
