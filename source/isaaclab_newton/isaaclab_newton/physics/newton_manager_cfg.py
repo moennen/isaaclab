@@ -266,7 +266,15 @@ class CoupledSolverCfg(NewtonSolverCfg):
     """Configuration for the coupled rigid-body + VBD solver.
 
     Alternates a rigid-body solver and a cloth solver (:class:`SolverVBD`) per
-    substep, implementing one-way coupling (rigid -> cloth).
+    substep. The coupling direction is controlled by :attr:`coupling_mode`:
+
+    - ``"one_way"`` (default): Rigid solver advances first, then VBD reads
+      the updated body poses. The rigid solver does not feel particle contacts.
+    - ``"two_way"``: Same-substep two-way coupling with normal + Coulomb
+      friction. Contact detection runs first, reaction forces are injected
+      into ``body_f``, then the rigid solver reads ``body_f`` and feels
+      resistance from the deformable object. The friction reaction lets
+      actuators carry the object against gravity during a lift.
 
     The rigid-body solver is selected by :attr:`rigid_solver_cfg`:
 
@@ -285,6 +293,13 @@ class CoupledSolverCfg(NewtonSolverCfg):
 
     soft_contact_margin: float = 0.01
     """Soft-contact detection margin for the CollisionPipeline [m]."""
+
+    coupling_mode: str = "two_way"
+    """Coupling direction between the rigid and VBD solvers.
+
+    - ``"one_way"``: Rigid → cloth only (default, existing behavior).
+    - ``"two_way"``: Same-substep two-way coupling with normal + Coulomb friction.
+    """
 
 
 @configclass

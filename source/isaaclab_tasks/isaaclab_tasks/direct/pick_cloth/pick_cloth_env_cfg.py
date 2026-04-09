@@ -73,6 +73,7 @@ class PickClothPhysicsCfg(PresetCfg):
                 integrate_with_external_rigid_solver=True,
             ),
             soft_contact_margin=0.01,
+            # coupling_mode="two_way",
         ),
         model_cfg=MODEL_CFG,
         num_substeps=10,
