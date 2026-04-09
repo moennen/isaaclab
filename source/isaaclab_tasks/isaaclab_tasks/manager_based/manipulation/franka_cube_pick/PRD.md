@@ -1,0 +1,190 @@
+# Franka Cube Pick — Product Requirements Document
+
+*Bootstrapped from conversation (no initial PRD was provided). Requirements derived from chat history.*
+
+---
+
+## Problem Statement
+
+Training an RL policy for manipulation tasks is error-prone because bugs in physics setup, reward functions, or observations only surface after expensive training runs. We need a validation framework that can catch these bugs *before* any policy is trained, by generating scripted sequences, replaying them in simulation, and correlating reward signals with known ground-truth labels.
+
+The specific task is a Franka Panda robot that must pick up a rigid cube if it is reachable, or move to a designated signal position if it is not. The two-branch design (pick vs. signal) tests whether the reward function correctly handles both reachable and unreachable cases without gradient leakage between branches.
+
+---
+
+## Goals
+
+1. Define a two-branch manipulation task (pick if reachable, signal if unreachable) as an Isaac Lab manager-based RL environment.
+2. Build a three-tool validation toolchain that validates physics, rewards, and observations without training any policy.
+3. Achieve > 90% label-reward correlation (sequence labelled "high reward" produces higher total reward than sequences labelled "low reward") when replaying scripted sequences.
+4. All four scenario types (reachable+success, reachable+failure, unreachable+success, unreachable+failure) produce meaningfully distinct reward signals.
+5. The validation toolchain is fully testable without Isaac Sim (unit tests run in the micromamba env).
+
+---
+
+## Non-Goals
+
+- RL policy training (out of scope until validation passes).
+- Table or elevated surfaces — cube rests on the ground plane only.
+- Multi-object manipulation.
+- Sim-to-real transfer or domain randomization.
+- Visual observations (joint-position observations only for now).
+
+---
+
+## Constraints
+
+- **Robot**: Franka Panda (FRANKA_PANDA_HIGH_PD_CFG for scripted sequences, FRANKA_PANDA_CFG for RL env).
+- **Simulator**: Isaac Sim 5.1.0, Isaac Lab (`feature/newton` branch), Python 3.11 via micromamba.
+- **Physics engine**: Newton (MJWarp) as the primary target; PhysX extension to come later.
+- **GPU**: L40 via NVIDIA DGX Cloud.
+- **Task location**: `source/isaaclab_tasks/isaaclab_tasks/manager_based/manipulation/franka_cube_pick/` — in the main `isaaclab_tasks` package (not experimental).
+- **No table**: cube rests directly on the ground at z = `cube_half_height`.
+- **Robot commands via DifferentialIK** for scripted sequences (PhysX only); joint-position actions for RL env (Newton-compatible).
+
+---
+
+## Requirements
+
+### Functional Requirements
+
+**F1 — Task environment**
+- F1.1: The environment follows the Isaac Lab manager-based pattern (`ManagerBasedRLEnvCfg`).
+- F1.2: A two-level config hierarchy: abstract base config + robot-specific derived config (MISSING pattern).
+- F1.3: The cube spawns randomly at positions consistent with its reachability label.
+- F1.4: The robot must move to `success_ee_position` after lifting the cube (reachable branch).
+- F1.5: The robot must move to `signal_ee_position` when the cube is unreachable.
+- F1.6: Reachability is determined geometrically (horizontal distance from robot base), not from any observation.
+
+**F2 — Reward function**
+- F2.1: Two branches gated by a float reachability mask (1.0 = reachable, 0.0 = unreachable).
+- F2.2: Branch A (reachable): approach cube → lift cube → reach success position.
+- F2.3: Branch B (unreachable): move EE to signal position.
+- F2.4: Pure-tensor reward kernels live in `reward_utils.py` (task root, no Isaac Lab imports). This is the single source of truth shared by the RL env, tools, and tests.
+- F2.5: `mdp/rewards.py` wraps `reward_utils.py` with env data extraction. `reward_eval.py` re-exports from `reward_utils.py`. No reward logic is duplicated.
+- F2.6: Action rate and joint velocity penalties apply to both branches.
+
+**F3 — Validation toolchain — Tool 1 (Generator)**
+- F3.1: Generate N labeled sequences via DifferentialIK following scripted waypoints.
+- F3.2: Label distribution: 70% reachable / 30% unreachable, 50% success / 50% failure.
+- F3.3: All four scenario types: reachable+success, reachable+failure, unreachable+success, unreachable+failure.
+- F3.4: Output: JSON file with per-frame joint positions, EE position, cube position, robot base position, joint velocities, gripper state.
+- F3.5: Runs in parallel across N environments.
+
+**F4 — Validation toolchain — Tool 2 (Replayer)**
+- F4.1: Replay all sequences (or a single specified sequence) standalone — no Isaac Sim required.
+- F4.2: Re-derive EE position via Newton FK from recorded joint angles (independent of generator).
+- F4.3: Compute per-frame rewards using `reward_utils.compute_all_rewards` — same kernels as RL env.
+- F4.4: Output: JSON with per-frame rewards for each term, episode totals, expected-high-reward flag.
+
+**F5 — Validation toolchain — Tool 3 (Analyzer)**
+- F5.1: Read replay JSON, produce statistical report without Isaac Sim.
+- F5.2: Outputs: reward histograms per scenario type, per-term reward curves over time, confusion matrix (expected vs. actual high/low reward), correlation scatter plot.
+- F5.3: Report saved as PNG figures + text summary.
+
+**F8 — Validation toolchain — Tool 4 (Visualizer)**
+- F8.1: Load all sequences from the JSON and let the user select which one to play via an interactive imgui sidebar panel — no restart required to switch sequences.
+- F8.2: Sidebar panel: label filter combo (all / reachable_success / reachable_failure / unreachable_success / unreachable_failure), scrollable sequence listbox (click = play immediately), speed slider (0.1–4.0×), progress bar, current frame info.
+- F8.3: Display robot arm (via Newton FK + `viewer.log_state`), cube (orange sphere), success target (green sphere), signal target (blue sphere), EE position (yellow sphere).
+- F8.4: Print per-frame reward stream (all terms) to stdout during playback.
+- F8.5: Uses `reward_utils.compute_all_rewards` — same kernels as RL env and replayer.
+- F8.6: Optional `--sequence_id` to jump to a specific sequence on launch.
+- F8.7: No Isaac Sim / AppLauncher required — pure Newton viewer + imgui_bundle (Python only, no build step).
+
+**F6 — Unit tests**
+- F6.1: Tests run without Isaac Sim (pure Python + PyTorch in micromamba env).
+- F6.2: Cover: reward function correctness, waypoint state machine geometry, sequence schema roundtrip, sampling distribution.
+- F6.3: No dummy tests — each test validates a realistic failure mode.
+
+**F7 — Observation space**
+- F7.1: State-based policy only (no visual observations).
+- F7.2: Single `policy` observation group following the dexsuite pattern — reads body state directly from articulation data, no FrameTransformer.
+- F7.3: Observation vector (47 dims):
+  - `cube_pos` (3): cube XYZ in robot root frame [m]
+  - `cube_quat` (4): cube orientation wxyz in robot root frame
+  - `ee_state` (13): EE pos(3) + quat(4) + lin_vel(3) + ang_vel(3) in robot root frame
+  - `joint_pos` (9): 7 arm + 2 finger joints [rad or m]
+  - `joint_vel` (9): 7 arm + 2 finger velocities [rad/s or m/s]
+  - `actions` (9): last joint-position action
+- F7.4: EE state is read from `robot.data.body_link_state_w` (panda_hand link) — compatible with Newton.
+- F7.5: Observation history may be added in a future iteration; start without it.
+
+### Non-Functional Requirements
+
+- NF1: Unit tests complete in under 10 seconds.
+- NF2: Generator supports at least 16 parallel environments.
+- NF3: Reward standalone implementation mirrors env implementation exactly (no silent divergence).
+- NF4: All world-state inputs to the reward function (robot position, cube position, EE position, joint velocities) come from live simulation state during replay, not from pre-recorded values.
+- NF5: All observation and reward functions are Newton-compatible — no FrameTransformer, no PhysX-specific API calls.
+- NF6: The sequence generator must run without Isaac Sim (standalone Newton IK), using only the URDF and Newton's IK library.
+
+---
+
+## Design Decisions
+
+| Decision | Choice | Rationale | Alternatives considered |
+|---|---|---|---|
+| Lift height | 0.5 m | Mid-Franka height (~1.0 m total); high enough to be unambiguously "lifted" | Initially proposed 0.05 m (1 cube height); user corrected to mid-Franka |
+| Reachable radius | [0.22, 0.65] m | Covers Franka's practical workspace; inner bound avoids self-collision, outer bound is arm reach limit | Validated with cube at [0.45, 0.1, 0.025] (dist≈0.461, reachable) and [0.80, 0.05, 0.025] (dist≈0.802, unreachable) |
+| Success EE position | [0.5, 0.0, 0.5] | In reachable zone, at mid-Franka height; reachable by the arm after lifting | — |
+| Signal EE position | [0.0, 0.0, 0.8] | Above and in front of robot; unambiguously distinct from any pick position | — |
+| Cube spawn zone | x: [0.0, 0.8], y: [-0.6, 0.6] | Covers both reachable and unreachable annulus regions | — |
+| Reachable+failure and unreachable+success robot motion | Both go to signal_pos | These scenarios are distinguished by *cube position* (reward mask), not by robot motion. Same EE trajectory, different reward branch active | Could have used different EE trajectories; rejected because it conflates signal motion with the reachability distinction |
+| Reward branch gating | Float mask (not boolean) | Enables gradient flow within each active branch; the inactive branch contributes exactly zero | Boolean mask would work for scripted evaluation but blocks gradient in RL training |
+| Sampling extraction | `_common/sampling.py` (separate from generate_sequences.py) | Avoids Isaac Sim AppLauncher bootstrap when running unit tests | Initially in generate_sequences.py; broke test collection with INTERNALERROR |
+| Frame recording | Includes `robot_pos_w` and `joint_vel` | Enables offline reward recomputation from JSON without running Isaac Sim | Initially omitted; added after noting reward function accesses full world state |
+| WaypointStateMachine timing | T_APPROACH=2.0s, T_GRASP=3.5s, T_LIFT=5.5s, total 8s | Gives robot enough time to approach, grasp, and lift at realistic joint velocities | — |
+| Physics engine | Newton (MJWarp, `feature/newton` branch) | Project starts with Newton; PhysX extension comes later | PhysX would have been simpler initially but doesn't match project's Newton-first goal |
+| Task package location | `isaaclab_tasks` (main, not experimental) | `isaaclab_tasks_experimental` was removed; all tasks now live in `isaaclab_tasks` | Was initially in experimental; refactored early in session |
+| EE tracking — no FrameTransformer | Read from `robot.data.body_link_state_w` (panda_hand) | FrameTransformer sensor is not available on Newton branch | FrameTransformer was used initially; removed when Newton compatibility was required |
+| Observation style | dexsuite-style, single Policy group, 47 dims | No FrameTransformer; reads body state directly; proven pattern from dexsuite tasks; Newton-compatible | Initial flat obs with `ee_position_in_robot_root_frame` (FrameTransformer); superseded |
+| Observation history | Not included (initial version) | Start simple; history can be added later if policy fails to disambiguate states | Adding history from the start adds complexity before baseline is proven |
+| Warp version conflict — root fix | Delete bundled warp 1.8.2 from `omni.warp.core-1.8.2+lx64/warp/`, create symlink to pip-installed warp 1.12.1 | Isaac Sim 5.1.0 ships `omni.warp.core-1.8.2` with a bundled warp 1.8.2 directory. The extension's own `extension.py` was designed to use a symlink to pip-installed warp (developer mode), but falls back to the bundled copy when the real directory exists. Replacing it with the symlink makes Isaac Sim use warp 1.12.1. | Runtime shim on `Array.__class_getitem__`; Newton-only kit (both workarounds, now removed) |
+| Sequence generator physics | Newton IK standalone (no AppLauncher) | Standalone is faster, reproducible, and doesn't depend on Isaac Sim startup. Kept even after warp fix. | DifferentialIK (PhysX); running Isaac Sim with Newton |
+| Sequence replayer physics | Newton FK standalone (no AppLauncher) | Standalone is faster and sufficient for reward validation. Warp fix would now allow AppLauncher-based replay too, but standalone is preferred. | Isaac Sim live physics (original design) |
+| Cube lift mechanism | Force-based grip assist (3D spring-damper body force) | Virtual grasp teleportation was discarded: it changes cube momentum discontinuously, making the training data physically incorrect. Stiff BOX-BOX contacts (ke=10000) produced 200N+ lateral impulses from IK drift. The current approach applies a 3D spring-damper body force (k_p=20 N/m, k_d=10 N·s/m) to the cube after T_GRIP=7.0s, tracking the EE in XYZ. Finger BOX contacts are kept soft (ke_BOX=100) to prevent lateral knock. | Virtual grasp (teleportation); stiff BOX-BOX contacts (200N+ impulses) |
+| Grip-assist dimensionality | 3D (XYZ) spring-damper | Z-only control was tried first but left XY velocity unconstrained after the T_GRIP wrist-rotation knock. Cube flew off up to 4m from the EE. 3D control damps the lateral knock within ~0.25s (ζ=3.16, overdamped). | Z-only (first attempt) |
+| Missing pip dependencies | `lazy-loader`, `isaaclab_physx`, `isaaclab_newton`, `pycollada` installed | These were missing from the env despite isaaclab editable install pointing to source 4.5.13 on the dexsuite branch | Not needed on standard main branch |
+| Sequence replayer physics | Newton FK standalone (no AppLauncher) — same analytic cube model as generator | Warp conflict prevents Isaac Sim startup for replay; FK-based replay independently re-derives EE position from joint angles and is sufficient to validate the reward function against the scripted trajectory | Isaac Sim live physics (original design) |
+| Replay high/low threshold | `10.0` total episode reward | Empirically validated: LOW sequences score 0.2–0.7, HIGH sequences score 103–1577. Any value in [1, 100] would be unambiguous. | Was a placeholder pending first run |
+| Reward architecture | `reward_utils.py` at task root — single source of truth, no Isaac Lab imports | Original design had `reward_eval.py` reimplementing the same math as `mdp/rewards.py`. Any drift between them would silently break validation. `reward_utils.py` is imported by both: env wrapping layer (`mdp/rewards.py`) and tools (`reward_eval.py` re-exports it). Tests, replayer, and visualizer all use the same kernels as RL training. | Keeping duplicate implementations in sync manually |
+| Visualizer | Newton ViewerGL (`visualize_sequence.py`) — no build, pure Python | Newton ships ViewerGL as a Python package; no compilation needed. Same reward kernels as training so what you see in the viewer is what the reward function sees. | Isaac Sim USD renderer; custom OpenGL app |
+
+---
+
+## Open Questions
+
+- **Position validation**: The geometry constants (reachable_radius_min/max, success_ee_position, signal_ee_position, cube_spawn_x/y) were proposed by the agent and have not yet been explicitly confirmed by the user. Marked `PENDING VALIDATION` in `04-task-domain.md`.
+- **Reward weights**: REWARD_WEIGHTS in reward_eval.py (approach=1.0, lift=10.0, success=15.0, signal=10.0, action_rate=-1e-4, joint_vel=-1e-4) validated by toolchain run (HIGH/LOW gap is orders of magnitude); final tuning may happen during RL training.
+
+---
+
+## Validation Criteria
+
+The project's validation phase is complete when:
+
+1. `pytest tests/validation/franka_cube_pick/` passes with 0 failures (**86/86 ✓ 2026-04-08**).
+2. Generator produces 100 sequences without errors; JSON is well-formed and all labels are geometrically consistent (**✓ 2026-04-08** — 37 reachable_success, 30 reachable_failure, 15 unreachable_success, 18 unreachable_failure).
+3. Replayer produces reward JSON where reachable+success episodes have higher total reward than reachable+failure episodes in > 90% of cases (**✓ 2026-04-08** — 100% accuracy, 100/100 sequences).
+4. Analyzer confusion matrix shows > 90% accuracy (label matches expected-high-reward classification) (**✓ 2026-04-08** — 100.0% accuracy, 52 TP, 48 TN, 0 FP/FN).
+5. Signal reward is zero throughout all reachable episodes; approach/lift/success rewards are zero throughout all unreachable episodes (branch exclusivity) (**✓ 2026-04-08** — 0/20,000 reachability mask mismatches).
+
+**Validation phase complete as of 2026-04-08.**
+
+---
+
+## Changelog
+
+- 2026-04-08: Initial PRD bootstrapped from conversation history (no prior PRD existed). Requirements synthesized retroactively — implementation was already in progress.
+- 2026-04-08: Added frame recording of `robot_pos_w` and `joint_vel` after noting reward function accesses full world state.
+- 2026-04-08: Updated Design Decisions with sampling extraction decision and frame recording decision.
+- 2026-04-08: Added Newton-first constraint; updated task location from experimental to `isaaclab_tasks`.
+- 2026-04-08: Added F7 (observation space) requirement group — dexsuite-style, 47-dim, state-based, Newton-compatible (no FrameTransformer).
+- 2026-04-08: Added NF5 (Newton compatibility). Added Design Decisions for physics engine, package location, EE tracking approach, observation style, and observation history.
+- 2026-04-08: Toolchain investigation: Isaac Sim 5.1.0 + Newton warp conflict (bundled warp 1.8.2 vs standalone 1.12.1). Solution: use Newton IK standalone (no AppLauncher) for generate_sequences.py. Added NF6.
+- 2026-04-08: Rewrote replay_sequences.py to run standalone with Newton FK (no AppLauncher). Added Design Decision for replayer physics approach. Ran full toolchain: 100 sequences, 100% accuracy, 0 mask mismatches. All validation criteria met. Validation phase complete.
+- 2026-04-08: Fixed warp 1.8.2/1.12.1 conflict at root cause: replaced bundled warp 1.8.2 in `omni.warp.core-1.8.2+lx64/` with symlink to pip-installed warp 1.12.1. AppLauncher now starts cleanly with warp 1.12.1 active. Updated Design Decisions.
+- 2026-04-08: Eliminated reward code duplication. Created `reward_utils.py` (task root, pure torch) as single source of truth. `mdp/rewards.py` now calls `reward_utils` instead of reimplementing math. `reward_eval.py` is now a thin re-export. Tests updated to `compute_*` naming. Added F2.4–F2.5, F8 requirements and Design Decision. Added Tool 4 (visualizer) using Newton ViewerGL.
+- 2026-04-08: Enhanced Tool 4 (visualize_sequence.py) with imgui sidebar: label filter combo, scrollable sequence listbox (click to play), speed slider, progress bar, frame info. `--sequence_id` is now optional (jumps to sequence on launch; defaults to first). Updated F8 requirements.
+- 2026-04-08: All four tool scripts now resolve `--input`/`--output` relative to the task folder (`<task_root>/data/validation/`) by default. No path arguments needed for standard runs. Existing outputs copied to task-relative location.
+- 2026-04-09: Removed virtual grasp (cube teleportation). Replaced with force-based 3D grip assist: soft finger BOX contacts (ke_BOX=100 N/m) + 3D spring-damper body force on cube after T_GRIP=7.0s (k_p=20, k_d=10). Z-only was tried first but cube decoupled laterally up to 4.06m from EE. 3D control keeps cube within 0.11m of EE (8/9 R+S sequences). Three GPU-CPU sync points eliminated in generate_sequences.py. Regenerated 40-sequence dataset (seed=1234): 39/40 OK replay (seq_0038 has early knock at t=4.96s before T_GRIP — marginal lift, same MISMATCH as Z-only run). Outputs: data/validation/sequences_3d.json + replay_3d.json.
