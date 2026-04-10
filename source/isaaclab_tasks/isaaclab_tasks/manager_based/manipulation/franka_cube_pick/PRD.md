@@ -147,6 +147,7 @@ The specific task is a Franka Panda robot that must pick up a rigid cube if it i
 | Missing pip dependencies | `lazy-loader`, `isaaclab_physx`, `isaaclab_newton`, `pycollada` installed | These were missing from the env despite isaaclab editable install pointing to source 4.5.13 on the dexsuite branch | Not needed on standard main branch |
 | Sequence replayer physics | Newton FK + full physics (robot PD tracks recorded joint_pos_cmd; cube fully simulated) | Pure FK (analytic cube teleportation) bypasses the contact/friction problem. Replayer now uses the same Newton physics model as the generator: same PD gains, gravcomp, contact params, solver, substeps. Robot motion is FK-equivalent (PD tracks recorded commands). Cube is free rigid body. | Analytic cube (Z follows EE Z after gripper closes); standalone FK |
 | Replay high/low threshold | `10.0` total episode reward | Empirically validated: LOW sequences score 0.2–0.7, HIGH sequences score 103–1577. Any value in [1, 100] would be unambiguous. | Was a placeholder pending first run |
+| Generator batching | Multi-world Newton (`begin_world`/`add_builder`/`end_world`) with `--num-worlds` (default 16) | Single-world generator is GPU-idle (IK bottleneck at N=1). Batching tiles N worlds into one physics model so all N episodes run simultaneously. IK also batched: `IKSolver(n_problems=N)`. CUDA graph capture disabled (SolverMuJoCo switches CUDA streams internally). Robot builder is unfinalized (no ground plane); cube added per-world inside `begin_world`/`end_world`; IK model is robot-only for `IKSolver`. Cube positions set via `state_0.joint_q` at reset so model is built once and reused across batches. Actual speedup: ~29× vs. single-world for N=16 (4.5 min / 16 seqs). | Single-world sequential (old: ~8 min/seq), 4 parallel shards via --seq_id_start (workaround, 63 min / 100 seq) |
 | Reward architecture | `reward_utils.py` at task root — single source of truth, no Isaac Lab imports | Original design had `reward_eval.py` reimplementing the same math as `mdp/rewards.py`. Any drift between them would silently break validation. `reward_utils.py` is imported by both: env wrapping layer (`mdp/rewards.py`) and tools (`reward_eval.py` re-exports it). Tests, replayer, and visualizer all use the same kernels as RL training. | Keeping duplicate implementations in sync manually |
 | Visualizer | Newton ViewerGL (`visualize_sequence.py`) — no build, pure Python | Newton ships ViewerGL as a Python package; no compilation needed. Same reward kernels as training so what you see in the viewer is what the reward function sees. | Isaac Sim USD renderer; custom OpenGL app |
 
@@ -165,11 +166,11 @@ The project's validation phase is complete when:
 
 1. `pytest tests/validation/franka_cube_pick/` passes with 0 failures (**86/86 ✓ 2026-04-08**).
 2. Generator produces N sequences without errors; JSON is well-formed and all labels are geometrically consistent (**✓ 2026-04-10** — 40 seqs: 9 R+S, 15 R+F, 9 U+S, 7 U+F).
-3. Replayer produces reward JSON where reachable+success episodes actually lift the cube and unreachable+success episodes reach signal_pos in > 90% of cases (**✓ 2026-04-10** — 99% accuracy, 99/100 sequences). Criterion: `success_frame >= 0` (task completion), not a reward threshold.
-4. Analyzer confusion matrix shows > 90% accuracy (success_frame matches expected_success label) (**✓ 2026-04-10** — 99.0% accuracy, 59 TP, 40 TN, 1 FN, 0 FP).
-5. Signal reward is zero throughout all reachable episodes; approach/lift/success rewards are zero throughout all unreachable episodes (branch exclusivity) (**✓ 2026-04-10** — 0/10,000 reachability mask mismatches).
+3. Replayer produces reward JSON where reachable+success episodes actually lift the cube and unreachable+success episodes reach signal_pos in > 90% of cases (**✓ 2026-04-10** — 100% accuracy, 100/100 sequences). Criterion: `success_frame >= 0` (task completion), not a reward threshold.
+4. Analyzer confusion matrix shows > 90% accuracy (success_frame matches expected_success label) (**✓ 2026-04-10** — 100.0% accuracy, 48 TP, 52 TN, 0 FN, 0 FP).
+5. Signal reward is zero throughout all reachable episodes; approach/lift/success rewards are zero throughout all unreachable episodes (branch exclusivity) (**✓ 2026-04-10** — 0/25,000 reachability mask mismatches).
 
-**Validation phase complete as of 2026-04-10 (re-validated with pure Newton physics).**
+**Validation phase complete as of 2026-04-10 (re-validated with batched Newton physics, 100/100 correct).**
 
 ---
 
@@ -199,4 +200,36 @@ The project's validation phase is complete when:
   grip_drop_early (times out mid-lift), wrong_approach_target (wrong XY), descend_open_grip (mis-timed
   grasp). All modes provably keep cube_z < 0.45m. Added _GRIP_DROP_MAX_T = T_GRIP + 1.0 = 8.0s safety
   constant. Updated Design Decisions: reachable_failure now has 5 modes. Updated F3.3.
+- 2026-04-10: Refactored generate_sequences.py to batched multi-world simulation. Robot builder is
+  unfinalized (no ground plane); cube added per-world inside begin_world/end_world; batched model built
+  once; cube positions set via state_0.joint_q at reset. IK solvers created once per stage, targets updated
+  each step by reassigning warp arrays. --num-worlds CLI arg (default 16) controls batch size. ~29× speedup
+  vs. N=1 sequential (4.5 min / 16 seqs vs 8 min / 1 seq).
+  Several Newton API bugs fixed in this version: (1) `body_label` not `body_key`; `label=` not `key=` for
+  add_shape_box/add_body; (2) IK names are `IKObjectivePosition`, `IKObjectiveRotation`,
+  `IKObjectiveJointLimit`, `IKJacobianType` (NOT the `IKPositionObjective`/`IKJacobianMode` variants);
+  (3) `control.joint_target_pos` has DOF count (6 per free joint), not coord count (7), so n_ctrl_per_world
+  = len(control.joint_target_pos)//N; (4) Robot must initialize to `_HOME_JOINT_Q` (Newton example "ready"
+  pose) — all-zero joint start puts EE at [0.088, 0, 0.926], 13cm XY off workspace, cube never gripped;
+  (5) SolverMuJoCo can't be CUDA-graph-captured (stream switch inside solver), falls back to eager mode
+  with state reset.
 - 2026-04-10: Removed force-based grip assist. Replaced with pure contact friction grasping using Newton example physics params (example_ik_cube_stacking.py). Root cause analysis: PD gains 7.5× too low, no gravcomp, no armature/effort limits, kf=0, impratio=1, dt=20ms > contact period T=8.9ms. Fixed: ke=4500/3500/2000, gravcomp, armature, effort limits, ke=5e4, kd=5e2, kf=1e3, mu=0.75, impratio=1000, cone=elliptic, 10 substeps×2ms. Replayer rewritten: FK+full Newton physics, 20×2ms substeps per frame, no analytic cube. Fixed reward_eval.py pxr import (importlib.util). Validated: 40/40 [OK], 100% accuracy (seed=1234, 40 seqs): R+S=304–415 HIGH (9/9, all success_frame=211), R+F=0.2–1.4 LOW (15/15), U+S=1133–1594 HIGH (9/9), U+F=2.2–2.6 LOW (7/7). 0/10000 mask mismatches. Better than old grip-assist (39/40). Outputs: sequences_physics.json, replay_physics.json, report_physics/.
+- 2026-04-10: Refactored replay_sequences.py to batched multi-world simulation, mirroring
+  generate_sequences.py. Identical build_robot_builder/build_batched_model/reset_batch_state;
+  per-frame sets ctrl from recorded joint_pos_cmd for all N worlds simultaneously; vectorised
+  reward computation with (N,3) torch tensors. Added --num-worlds arg (default 16).
+  15 min / 100 seqs vs 47 min sequential (3.1× speedup). 100/100 [OK], identical accuracy.
+- 2026-04-10: Fixed two bugs in generate_sequences.py + replay_sequences.py after batched rewrite
+  (A) Generator bug: `joint_pos_cmd` in each recorded frame was storing `joint_q_ik_np[w]` (raw IK
+  output with fingers always at 0.04 open) instead of `ctrl_np[w, :_N_ROBOT_JOINTS]` (actual control
+  signal, which overrides finger joints 7–8 with the real finger command 0.04→0.0 at grasp time, and
+  0.0→0.04 at drop time for grip_drop_early). Fixed: now records `ctrl_np[w, :_N_ROBOT_JOINTS]`.
+  (B) Replay bug: `control.joint_target_pos` assignment used `np.zeros(n_phys)` (size 16 = coord count)
+  instead of `np.zeros(n_dof)` (size 15 = DOF count). Free joint has 7 coordinates but only 6 DOFs.
+  Fixed: now uses n_dof and `.assign()` instead of replacement.
+  (C) Replay bug: robot initialised from URDF default (all-zeros, EE at [0.088, 0, 0.926]) rather than
+  `_HOME_JOINT_Q` (EE at [0.495, 0, 0.313]). This caused false signal triggers (EE 0.155m from
+  signal_pos [0,0,0.8]) and failed grasps. Fixed: added `_HOME_JOINT_Q` initialisation to
+  `build_phys_model()` in replay_sequences.py.
+  Dataset regenerated and re-validated: 100/100 [OK], 100.0% accuracy. Confusion: 48 TP, 52 TN, 0 FN,
+  0 FP. Physics variance: mean ≤ 0.003 rad across all label types. Outputs: sequences.json, replay.json.
