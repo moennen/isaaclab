@@ -67,15 +67,17 @@ class Phase:
 # For a clean side pinch, we want the TCP a little above the cube base so the
 # fingers straddle the cube sides. Targeting TCP at cube center (z_offset=0.0)
 # means the hand body sits at HAND_TCP_Z above the cube center.
-HAND_TCP_Z    = 0.1034  # hand body → TCP offset along world Z for top-down grasp [m]
-TCP_GRASP_Z   = 0.0     # desired TCP z-offset above cube center at grasp [m]
-GRASP_Z_OFFSET = TCP_GRASP_Z + HAND_TCP_Z  # = 0.1034 m hand body offset above cube center
-LIFT_Z_OFFSET  = 0.40   # EE z-offset above cube center when lifted [m]
+HAND_TCP_Z      = 0.1034  # hand body → TCP offset along world Z for top-down grasp [m]
+TCP_GRASP_Z     = 0.0     # desired TCP z-offset above cube center at grasp [m]
+GRASP_Z_OFFSET  = TCP_GRASP_Z + HAND_TCP_Z  # = 0.1034 m hand body offset above cube center
+LIFT_Z_OFFSET   = 0.40   # EE z-offset above cube center when lifted [m]
+PREGRASP_Z_OFFSET = 0.30  # EE z-offset above object for the pre-grasp hover [m]
 
 PHASES: list[Phase] = [
-    Phase("reach", duration_s=3.0, ee_offset=(0.0, 0.0, GRASP_Z_OFFSET), gripper_closed=False),
-    Phase("grasp", duration_s=1.0, ee_offset=(0.0, 0.0, GRASP_Z_OFFSET), gripper_closed=True),
-    Phase("lift",  duration_s=3.0, ee_offset=(0.0, 0.0, LIFT_Z_OFFSET),  gripper_closed=True),
+    Phase("pre_grasp", duration_s=2.0, ee_offset=(0.0, 0.0, PREGRASP_Z_OFFSET), gripper_closed=False),
+    Phase("reach",     duration_s=2.0, ee_offset=(0.0, 0.0, GRASP_Z_OFFSET),    gripper_closed=False),
+    Phase("grasp",     duration_s=1.0, ee_offset=(0.0, 0.0, GRASP_Z_OFFSET),    gripper_closed=True),
+    Phase("lift",      duration_s=3.0, ee_offset=(0.0, 0.0, LIFT_Z_OFFSET),     gripper_closed=True),
 ]
 
 
@@ -172,10 +174,7 @@ def main():
 
             # ── compute scripted target ───────────────────────────────────────
             # Read object position from env observations (updated each step).
-            # Support both cube and cylinder envs.
-            obj_pos_tensor = getattr(raw_env, "_cube_pos", None)
-            if obj_pos_tensor is None:
-                obj_pos_tensor = raw_env._cylinder_pos
+            obj_pos_tensor = raw_env._object_pos
             obj_pos = wp.vec3(*obj_pos_tensor[0].tolist())
             ee_pos, gripper_closed, phase_name = controller.get_target(sim_time, obj_pos)
 

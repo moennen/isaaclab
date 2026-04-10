@@ -164,6 +164,31 @@ class TetMeshCuboidCfg(MeshCfg):
 
 
 @configclass
+class TetMeshFromFileCfg(MeshCfg):
+    """Configuration parameters for spawning a tet mesh from a Gmsh ``.msh`` file.
+
+    Loads tetrahedral mesh data via meshio and creates a ``UsdGeom.TetMesh`` prim
+    with vertex positions, tet connectivity, and surface triangles — the same
+    structure as :class:`TetMeshCuboidCfg`.
+
+    See :meth:`spawn_tet_mesh_from_file` for more information.
+    """
+
+    func: Callable | str = "{DIR}.meshes:spawn_tet_mesh_from_file"
+
+    file_path: str = MISSING
+    """Path to the tet mesh file (``.msh`` Gmsh format)."""
+
+    scale: tuple[float, float, float] | float | None = None
+    """Scale applied to vertex positions before writing to the stage.
+
+    Use this to convert mesh units (e.g. ``0.01`` or ``(0.01, 0.01, 0.01)`` for cm to m).
+    Unlike Xform scale, this modifies the actual vertex positions so the geometry in the
+    stage is in the correct units. A scalar value is broadcast to all three axes.
+    """
+
+
+@configclass
 class MeshFromFileCfg(MeshCfg):
     """Configuration parameters for spawning a mesh prim from a USD file.
 
