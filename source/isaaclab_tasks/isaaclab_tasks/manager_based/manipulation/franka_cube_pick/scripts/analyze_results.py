@@ -34,9 +34,9 @@ _OUTPUTS_DIR = _TASK_ROOT / "data" / "validation"
 # ---- args ------------------------------------------------------------------
 
 parser = argparse.ArgumentParser(description="Analyze Franka cube pick replay results.")
-parser.add_argument("--input",  type=str, default=str(_OUTPUTS_DIR / "replay.json"),
+parser.add_argument("--input",  type=str, default=str(_OUTPUTS_DIR / "reference_ik_replay.json"),
                     help="Path to replay output JSON.")
-parser.add_argument("--output", type=str, default=str(_OUTPUTS_DIR / "report"),
+parser.add_argument("--output", type=str, default=str(_OUTPUTS_DIR / "reference_ik_report"),
                     help="Directory for output PNGs + report.")
 parser.add_argument("--show",   action="store_true", help="Show plots interactively.")
 parser.add_argument(
@@ -364,7 +364,7 @@ def main():
         vals = variance_by_lbl.get(lbl, [])
         if vals:
             arr = np.array(vals)
-            line = f"  {lbl:<28}: mean={arr.mean():.4f}  std={arr.std():.4f}  max={arr.max():.4f}"
+            line = f"  {lbl:<28}: mean={arr.mean():.4f}  std={arr.std():.4f}  min={arr.min():.4f}  max={arr.max():.4f}"
             print(line)
             variance_report_lines.append(line)
     print()

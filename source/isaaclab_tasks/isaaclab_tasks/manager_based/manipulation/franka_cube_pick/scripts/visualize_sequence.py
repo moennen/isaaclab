@@ -21,7 +21,7 @@ so what you see in the viewer is exactly what the reward function sees.
 Usage
 -----
 python visualize_sequence.py \\
-    --input  data/validation/sequences.json \\
+    --input  data/validation/reference_ik_sequences.json \\
     [--sequence_id seq_0003]   # optional: jump to this sequence on launch
     [--speed 1.0]              # playback speed multiplier
     [--viewer gl|null]         # gl = interactive, null = headless test
@@ -431,8 +431,8 @@ class SequenceVisualizer:
 
 def main():
     parser = newton_examples.create_parser()
-    parser.add_argument("--input",       type=str, default=str(_OUTPUTS_DIR / "sequences.json"),
-                        help="Path to sequences.json (Tool 1 output).")
+    parser.add_argument("--input",       type=str, default=str(_OUTPUTS_DIR / "reference_ik_sequences.json"),
+                        help="Path to reference_ik_sequences.json (Tool 1 output).")
     parser.add_argument("--sequence_id", type=str, default=None,
                         help="Sequence ID to jump to on launch (optional). "
                              "If omitted the first sequence in the list is shown.")

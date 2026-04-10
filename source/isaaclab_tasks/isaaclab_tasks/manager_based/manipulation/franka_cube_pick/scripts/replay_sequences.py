@@ -123,9 +123,9 @@ _CUBE_HALF_SIZE = 0.025
 _CUBE_DENSITY   = 400.0   # kg/m³
 
 # Substeps per recorded frame (must be EVEN so state_0 holds result after the loop).
-# Generator: 10 substeps per outer step × record_every=2 outer steps = 20 substeps.
-_N_SUBSTEPS_PER_FRAME = 20
-_SUB_DT               = 0.002   # 2ms per substep → 40ms per recorded frame
+# Generator: 10 substeps per outer step × record_every=1 outer step = 10 substeps.
+_N_SUBSTEPS_PER_FRAME = 10
+_SUB_DT               = 0.002   # 2ms per substep → 20ms per recorded frame
 
 
 def _find_panda_urdf() -> Path:
@@ -482,9 +482,9 @@ def main():
     parser = argparse.ArgumentParser(
         description="Replay Franka cube pick sequences with batched Newton FK + full physics."
     )
-    parser.add_argument("--input",       type=str, default=str(_OUTPUTS_DIR / "sequences.json"),
-                        help="Path to sequences.json (Tool 1 output).")
-    parser.add_argument("--output",      type=str, default=str(_OUTPUTS_DIR / "replay.json"),
+    parser.add_argument("--input",       type=str, default=str(_OUTPUTS_DIR / "reference_ik_sequences.json"),
+                        help="Path to reference_ik_sequences.json (Tool 1 output).")
+    parser.add_argument("--output",      type=str, default=str(_OUTPUTS_DIR / "reference_ik_replay.json"),
                         help="Path for replay output JSON.")
     parser.add_argument("--num-worlds",  type=int, default=16,
                         help="Batch size — number of sequences replayed simultaneously.")

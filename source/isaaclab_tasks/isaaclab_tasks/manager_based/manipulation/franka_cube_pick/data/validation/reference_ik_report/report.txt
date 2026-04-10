@@ -1,0 +1,37 @@
+Franka Cube Pick Validation Report
+Source: /home/horde/projects/IsaacLab/source/isaaclab_tasks/isaaclab_tasks/manager_based/manipulation/franka_cube_pick/data/validation/reference_ik_replay.json
+Threshold (high/low): 100.0
+
+Total sequences: 100
+
+CONFUSION MATRIX
+  TP=48  FN=0  TN=52  FP=0
+  Accuracy: 100.0%
+
+Label                            N     Mean      Std      Min      Max
+--------------------------------------------------------------------------------
+reachable_success               31   672.50    66.34   615.89   876.33
+reachable_failure               33    28.73    21.79     0.22    61.87
+unreachable_success             17  2719.45   367.87  2128.22  3179.75
+unreachable_failure             19     0.24     0.38     0.04     1.74
+
+REACHABILITY MASK CONSISTENCY
+--------------------------------------------------
+  reachable_success           : 0/15500 mismatches (0.0%) [OK]
+  reachable_failure           : 50/16500 mismatches (0.3%) [OK]
+  unreachable_success         : 0/8500 mismatches (0.0%) [OK]
+  unreachable_failure         : 0/9500 mismatches (0.0%) [OK]
+
+SUCCESS FRAME SUMMARY
+--------------------------------------------------
+  reachable_success           : 31/31 hit  mean_frame=423  min=422  max=423
+  reachable_failure           : 0/33 hit (none reached success)
+  unreachable_success         : 17/17 hit  mean_frame=135  min=70  max=206
+  unreachable_failure         : 0/19 hit (none reached success)
+
+PHYSICS VARIANCE
+--------------------------------------------------
+  reachable_success           : mean=0.0000  std=0.0000  min=0.0000  max=0.0000
+  reachable_failure           : mean=0.0000  std=0.0000  min=0.0000  max=0.0002
+  unreachable_success         : mean=0.0000  std=0.0000  min=0.0000  max=0.0000
+  unreachable_failure         : mean=0.0000  std=0.0000  min=0.0000  max=0.0000

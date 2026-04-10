@@ -619,7 +619,7 @@ def generate_sequences(args):
     dt = 0.02         # 50 Hz
     T_END = 10.0
     steps_per_ep = int(T_END / dt)   # 500
-    RECORD_EVERY = 2                  # 250 frames at 25 Hz
+    RECORD_EVERY = 1                  # 500 frames at 50 Hz — one frame per outer step
 
     num_worlds = args.num_worlds
 
@@ -779,7 +779,7 @@ def main():
     parser.add_argument("--num-worlds",      type=int,   default=16,
                         help="Worlds per batch (batch size). Default 16. "
                              "All worlds run simultaneously on GPU.")
-    parser.add_argument("--output",          type=str,   default=str(_OUTPUTS_DIR / "sequences.json"))
+    parser.add_argument("--output",          type=str,   default=str(_OUTPUTS_DIR / "reference_ik_sequences.json"))
     parser.add_argument("--reachable_ratio", type=float, default=0.7)
     parser.add_argument("--success_ratio",   type=float, default=0.5)
     parser.add_argument("--seed",            type=int,   default=42)
