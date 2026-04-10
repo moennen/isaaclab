@@ -301,6 +301,7 @@ class PickRigidCubeEnv(DirectRLEnv):
 
         # Cube position from rigid body root state
         self._cube_pos = wp.to_torch(self.cube.data.root_pos_w)  # (num_envs, 3)
+        self._object_pos = self._cube_pos
 
         obs = torch.cat(
             (

@@ -134,7 +134,7 @@ class PickVBDCubeEnvCfg(DirectRLEnvCfg):
             visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.2, 0.8, 0.2)),
         ),
         init_state=DeformableObjectCfg.InitialStateCfg(
-            pos=(0.5, 0.0, 0.05),
+            pos=(0.25, 0.0, 0.05),
         ),
         density=500.0,
         tri_ke=1e5,

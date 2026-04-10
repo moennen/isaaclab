@@ -281,6 +281,7 @@ class PickVBDCubeEnv(DirectRLEnv):
         # Cube centroid: mean of all nodal positions
         nodal_pos = wp.to_torch(self.cube.data.nodal_pos_w)  # (num_envs, num_particles, 3)
         self._cube_centroid = nodal_pos.mean(dim=1)  # (num_envs, 3)
+        self._object_pos = self._cube_centroid
 
         obs = torch.cat(
             (

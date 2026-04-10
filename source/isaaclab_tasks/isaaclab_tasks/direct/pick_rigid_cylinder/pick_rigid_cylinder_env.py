@@ -296,6 +296,7 @@ class PickRigidCylinderEnv(DirectRLEnv):
 
         # Cylinder position from rigid body root state
         self._cylinder_pos = wp.to_torch(self.cylinder.data.root_pos_w)  # (num_envs, 3)
+        self._object_pos = self._cylinder_pos
 
         obs = torch.cat(
             (
