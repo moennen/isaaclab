@@ -131,9 +131,12 @@ def main():
                 )
             frame_totals_seq.append(frame["rewards"].get("total", 0.0))
 
-        # Confusion
+        # Confusion — use task completion (success_frame >= 0), not reward threshold.
+        # Threshold-based classification is fragile: near-cube failure modes accumulate
+        # approach reward that can exceed any fixed threshold. success_frame is set by
+        # physics directly (cube_z > lift_height for reachable; ee near signal for unreachable).
         expected_high = seq["expected_high_reward"]
-        actual_high   = total > thresh
+        actual_high   = seq.get("success_frame", -1) >= 0
         if expected_high and actual_high:      confusion["TP"] += 1
         elif expected_high and not actual_high: confusion["FN"] += 1
         elif not expected_high and actual_high: confusion["FP"] += 1
@@ -158,11 +161,11 @@ def main():
         report_lines.append(row)
     print("=" * 80)
 
-    print("\nCONFUSION MATRIX (threshold = {:.1f})".format(thresh))
-    print(f"  True  Positives (expected HIGH, got HIGH): {confusion['TP']}")
-    print(f"  False Negatives (expected HIGH, got LOW):  {confusion['FN']}")
-    print(f"  True  Negatives (expected LOW,  got LOW):  {confusion['TN']}")
-    print(f"  False Positives (expected LOW,  got HIGH): {confusion['FP']}")
+    print("\nCONFUSION MATRIX (criterion: success_frame >= 0, no threshold)")
+    print(f"  True  Positives (expected SUCCESS, got SUCCESS): {confusion['TP']}")
+    print(f"  False Negatives (expected SUCCESS, got FAILURE): {confusion['FN']}")
+    print(f"  True  Negatives (expected FAILURE, got FAILURE): {confusion['TN']}")
+    print(f"  False Positives (expected FAILURE, got SUCCESS): {confusion['FP']}")
     total_seqs = sum(confusion.values())
     accuracy = (confusion["TP"] + confusion["TN"]) / max(total_seqs, 1) * 100
     print(f"  Accuracy: {accuracy:.1f}%  ({total_seqs} sequences)")

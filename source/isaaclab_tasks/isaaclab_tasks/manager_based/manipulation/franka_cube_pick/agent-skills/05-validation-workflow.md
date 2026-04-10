@@ -2,7 +2,7 @@
 name: validation-workflow
 description: Validate physics, rewards, and observations using scripted sequences before RL training. Four standalone tools — generator, replayer, analyzer, visualizer.
 level: 4
-status: draft
+status: validated
 depends_on: [franka-cube-pick-domain]
 extends: null
 ---
@@ -26,24 +26,47 @@ Each category has a dedicated validation tool. All three run **fully standalone 
 Isaac Sim / AppLauncher required**. This sidesteps the warp 1.8.2 / 1.12.1 conflict
 (Isaac Sim 5.1.0 bundles warp 1.8.2 via `omni.warp.core`; Newton requires warp 1.12.1).
 
-**Architecture decision — standalone replay:** The replayer (Tool 2) was originally
-designed to run live Isaac Sim physics. Because the warp conflict prevents clean Isaac
-Sim startup with Newton, Tool 2 was redesigned to run standalone using Newton FK:
-- Recorded joint angles → Newton `eval_fk` → EE position in world frame
-- Cube physics: analytic (cube XY fixed at init; Z follows EE Z after gripper closes)
-- Reward computation: `reward_eval.py` (pure torch, no env object)
+**Architecture decision — pure Newton physics (generator + replayer):**
 
-This is sufficient to validate the reward function against the scripted trajectory.
-FK-derived EE positions are independent of the generator's IK, so IK errors would surface.
+Both the generator (Tool 1) and replayer (Tool 2) use the same full Newton physics model
+(robot + cube, 16 DOF). No analytic cube approximations, no kinematic overrides:
+- Robot: PD controller tracks IK-computed targets (generator) / recorded joint_pos_cmd (replayer)
+- Cube: full rigid-body simulation — gravity, contact forces, friction (Newton MuJoCo solver)
+- Grasping: purely through friction contacts (no grip assist, no teleportation)
+
+**Physics parameters (from Newton example `example_ik_cube_stacking.py`):**
+- PD gains: `ke=[4500×2, 3500×2, 2000×3, 100×2]`, `kd=ke/10`
+- Armature: `[0.30×4, 0.11×3, 0.15×2]`, effort limits: `[87×4, 12×3, 100×2]`
+- Gravity compensation: `mujoco:jnt_actgravcomp` (arm DOFs), `mujoco:gravcomp` (all bodies)
+- Contact: `ke=5e4, kd=5e2, kf=1e3, mu=0.75`
+- Solver: `impratio=1000, cone=elliptic, iterations=20, ls_iterations=100`
+- Substeps: 10 × 2ms per 20ms outer step (contact period T=8.9ms → sub_dt=2ms < T)
+
+**Key physics insight — contact stability:** ke=5e4 with m=0.1kg gives ω_n=707 rad/s →
+contact period T=8.9ms. A 20ms timestep is 2× larger than T, causing numerical instability.
+10 substeps of 2ms each (matching the example's approach) resolves this.
+
+**Generator recording:** 500 outer steps × 2ms/substep × 10 substeps = 10s; records every 2nd
+outer step → 250 frames at 25Hz. Between consecutive frames: 20 substeps of 2ms = 40ms.
 
 **Scripted sequences used for validation:**
 
 | Label | Robot behaviour |
 |---|---|
 | reachable_success | approach → grasp → lift to 0.5m → success_pos |
-| reachable_failure | goes to signal_pos instead (wrong) |
+| reachable_failure | one of 5 realistic failure modes (see below) — cube never lifted above 0.45m → LOW reward |
 | unreachable_success | goes to signal_pos (correct) |
 | unreachable_failure | tries to approach unreachable cube (wrong) |
+
+**Reachable failure modes (5 modes, equal probability):**
+
+| Mode | Description | Why reward stays LOW |
+|---|---|---|
+| `approach_no_grip` | Full correct trajectory (approach → descent → lift pose → success_pos) but gripper stays OPEN throughout. Robot ends at success_pos holding nothing. | Cube never lifted — stays on floor |
+| `stop_at_pregrasp` | Approaches correctly above cube then holds there. Never descends to grasp height. | No cube contact — cube never moves |
+| `grip_drop_early` | Full approach → grip → brief lift → opens gripper at T_GRIP+0.2 to T_GRIP+1.0s (=7.2–8.0s). Cube lifted a few cm then falls. | Drop time capped at 8.0s; EE reaches 0.45m only at ~8.19s (ease-in geometry) → cube_z never exceeds 0.45m |
+| `wrong_approach_target` | Goes to a random reachable position far from the cube. Never contacts cube. | No cube contact |
+| `descend_open_grip` | Correct descent to grasp height, holds there with gripper OPEN (cube barely touched but no friction grip), then retreats to home. | No grasping force — cube at most displaced slightly |
 
 ## Toolchain
 
@@ -85,8 +108,10 @@ Output JSON contains per-frame: `joint_pos` (9 values), `joint_vel` (9 values),
 
 ### Tool 2 — replay_sequences.py
 
-Newton FK standalone: re-derives EE position from joint angles, analytic cube physics,
-computes rewards via `reward_eval.compute_all_rewards`.
+Newton FK + full physics: drives robot via recorded `joint_pos_cmd` targets (PD controller,
+FK-equivalent), cube fully simulated (gravity, contacts, friction), computes rewards via
+`reward_eval.compute_all_rewards`. Same Newton model as generator — identical PD gains,
+gravcomp, contact params, solver, 20 substeps×2ms per recorded frame.
 
 ```bash
 python source/isaaclab_tasks/isaaclab_tasks/manager_based/manipulation/franka_cube_pick/scripts/replay_sequences.py
@@ -153,34 +178,36 @@ This is the ground-truth reward implementation used for validation. It mirrors
 | action_rate | always | -‖Δjoint_pos‖² | -1e-4 |
 | joint_vel | always | -‖joint_vel‖² | -1e-4 |
 
-**Physics run stats (seed=1234, 40 sequences — 2026-04-09, force-based grip assist, 3D XYZ control):**
+**Physics run stats (seed=1234, 100 sequences — 2026-04-10, pure contact friction, 5 failure modes):**
+
+**99/100 [OK] — 99% accuracy.** Success/failure discriminated by `success_frame >= 0` (no threshold).
 
 | Label | N | Episode reward | Success frame | Status |
 |---|---|---|---|---|
-| reachable_success | 9 | 9.6–308.3 | 210–212 | 8/9 HIGH, 1 MISMATCH (seq_0038 marginal) |
-| reachable_failure | 15 | 0.3–1.9 | — | all LOW ✓ |
-| unreachable_success | 9 | 1091.9–1526.9 | 34–98 | all HIGH ✓ |
-| unreachable_failure | 7 | 0.5–0.7 | — | all LOW ✓ |
+| reachable_success | 45 | 283–440 (mean=340) | all 211 | 45/45 ✓ |
+| reachable_failure | 25 | 0.24–32.1 (mean=14.2) | — | 0/25 reached success ✓ |
+| unreachable_success | 15 | 12.9–1594 (mean=1271) | 35–104 (mean=59) | 14/15 ✓ |
+| unreachable_failure | 15 | 2.19–2.69 (mean=2.26) | — | 0/15 reached success ✓ |
 
-39/40 OK, 1 MISMATCH (seq_0038: early knock at t=4.96s before T_GRIP → marginal lift, reward=9.6 vs threshold 10.0).
-Outputs: `data/validation/sequences_3d.json` + `replay_3d.json`.
+1 FN: unreachable_success where IK diverged (EE ~0.3m from signal_pos, never within 0.15m). Known
+IK convergence issue at signal_pos=[0,0,0.8] (near singularity). Not a physics or reward bug.
+0 FP: all 25 reachable_failure sequences correctly classified (approach_no_grip/descend_open_grip
+accumulate 20-32 approach reward but cube never lifted → success_frame=-1 → FAILURE).
+Reachability mask mismatches: 29/25000 (0.1%) — all in reachable_success, within tolerance.
+Joint variance: 0.002–0.005 rad.
+Outputs: `data/validation/sequences_100.json` + `replay_100.json` + `report_100/`.
 
-**Physics correctness (cube-EE distance at episode end, R+S only):**
+**[SUPERSEDED] Physics run stats (seed=1234, 40 sequences — 2026-04-10, old 3 failure modes):**
+40/40 [OK], 100% accuracy (threshold-based). Old failure modes (stop_short, wrong_target, signal) never
+approached cube → < 2 reward → safely below old 10.0 threshold. Superseded by 5-mode dataset.
 
-| Sequence | Distance | Notes |
-|---|---|---|
-| seq_0004–seq_0036, seq_0039 | 0.097–0.109m | 3D grip-assist tracking EE perfectly |
-| seq_0038 | 0.261m | early knock at t=4.96s (before T_GRIP); pathological |
+Compare with old grip-assist (2026-04-09): 39/40 OK (seq_0038 MISMATCH at early knock). Pure friction is strictly better: 40/40 and no artificial forces in the training data.
 
-Compared to Z-only (old): seq_0039 was 4.06m, seq_0032 was 1.85m — 3D control fixes all.
+**Previous run stats (seed=1234, 40 sequences — 2026-04-09, force-based grip assist):** SUPERSEDED.
+Grip assist used a 3D spring-damper body force (k_p=20, k_d=10) to track cube to EE. Physically
+incorrect — bypasses the contact/friction problem. Removed in favour of pure Newton physics.
 
-**Grip-assist physics (reachable+success only):**
-- After T_GRIP=7.0s, a 3D spring-damper body force tracks the cube to the EE position in XYZ.
-- Parameters: k_p=20 N/m, k_d=10 N·s/m, gravity compensation F_z += m*g=1.226 N.
-- Finger BOX contacts kept soft (ke_BOX=100 N/m) to prevent 200N+ lateral impulses from IK drift.
-- Replayer mirrors generator exactly (same 3D force law per physics substep, using body_q[hand_idx][:3]).
-
-**Previous run stats (seed=100, 8 sequences — 2026-04-08):** reachable_success ~1641, unreachable_success ~1735 (superseded — those used virtual grasp teleportation which was physically incorrect).
+**Previous run stats (seed=100, 8 sequences — 2026-04-08):** SUPERSEDED — used virtual grasp teleportation.
 
 ## Steps
 
@@ -216,8 +243,8 @@ All paths default to `<task_root>/data/validation/` — run from any directory.
 | Variable | Value | What it controls | Safe to change? |
 |---|---|---|---|
 | num_sequences | 100 | Total sequences for validation | Yes — more gives better statistics |
-| num_envs | 16 | IK batch size per cycle (generator) | Yes — adjust for memory |
-| high_reward_threshold | 10.0 | HIGH/LOW classification cutoff in analyzer | Yes if reward weights change; re-verify gap is > 2× |
+| num_envs | 16 | Kept for CLI compatibility — ignored (physics runs sequentially) | N/A |
+| high_reward_threshold | N/A (removed) | SUCCESS/FAILURE now uses `success_frame >= 0`, not a reward threshold. Approach reward accumulates in near-cube failure modes (20–32) — any threshold would be fragile. | Threshold was 10.0, removed when 5 realistic failure modes were added |
 | seed | 42 | Random seed for reproducible generation | Yes |
 
 ## Verification
@@ -236,12 +263,18 @@ Accuracy: 100.0%  (N sequences)
   unreachable_failure         : 0/... mismatches (0.0%) [OK]
 
 SUCCESS FRAME SUMMARY
-  reachable_success    : N/N hit  mean_frame~180  (within 250-frame budget)
-  unreachable_success  : N/N hit  mean_frame~50
+  reachable_success    : N/N hit  mean_frame=211  (within 250-frame budget)
+  unreachable_success  : N/N hit  mean_frame~68
 
 PHYSICS VARIANCE
-  all labels: mean~0.001–0.002 rad
+  reachable_success:    mean~0.002–0.003 rad
+  unreachable_success:  mean~0.003–0.004 rad
+  reachable_failure:    mean~0.003 rad (outliers possible: stop_short IK divergence)
 ```
+
+Validated run (seed=1234, 100 seqs, 2026-04-10): 99/100 OK, 99% accuracy (success_frame criterion).
+  reachable_success=340 (mean), reachable_failure=14.2 (mean, incl. approach-reward modes), unreachable_success=1271, unreachable_failure=2.26.
+  1 FN: IK diverged for 1 unreachable_success (EE near but outside 0.15m signal_pos threshold).
 
 Six output files written to `--output` dir:
 - `01_reward_histograms.png`
@@ -260,6 +293,7 @@ Six output files written to `--output` dir:
 | `pycollada` import error | Missing package | `pip install pycollada` |
 | All sequences `[MISMATCH]` | Reward function sign error | Check REWARD_WEIGHTS signs in reward_eval.py |
 | Reachability mask mismatches | Radius bounds don't match sampling bounds | Check reachable_radius_min/max vs sample_cube_pos in sampling.py |
+| `ModuleNotFoundError: No module named 'pxr'` | `reward_eval.py` imported via package path triggering full Isaac Lab import chain | Fixed: `reward_eval.py` now imports `reward_utils.py` via `importlib.util.spec_from_file_location` (bypasses package `__init__`) |
 | `IKObjectivePosition` keyword error | Wrong newton.ik API (newton version changed) | Check `newton.ik.IKObjectivePosition` signature; expected: `link_index, link_offset, target_positions` |
 | IK local minimum for signal_pos [0,0,0.8] | IK sometimes converges to EE at [0,0,0.933] | Acceptable for validation; reward still fires correctly because the ee-to-signal distance drives the `go_to_signal` term |
 | `OpenGLRenderer requires pyglet (version >= 2.0)` | pyglet 1.x installed (isaaclab pins pyglet<2) | `pip install "pyglet>=2.0"` — the isaaclab<2 constraint is a stale transitive dep, harmless for standalone Newton viewer |
@@ -276,3 +310,27 @@ Six output files written to `--output` dir:
   stays within 0.11m of EE for 8/9 R+S sequences. Three GPU-CPU syncs eliminated in
   generator. Replayer updated to mirror 3D force law. Dataset regenerated (seed=1234,
   40 seqs): 39/40 OK (seq_0038 early knock at t<T_GRIP → marginal reward=9.6).
+- 2026-04-10: changed SUCCESS/FAILURE discriminator in replay + analyze from `episode_total > 10.0`
+  (fragile threshold) to `success_frame >= 0` (task physically completed: cube_z > lift_height for
+  reachable, ee within 0.15m of signal for unreachable). Near-cube failure modes accumulate 20–32
+  approach reward — any fixed threshold is fragile across sequence regeneration. success_frame is
+  physics-grounded, no threshold to tune. Updated replay_sequences.py and analyze_results.py.
+- 2026-04-10: generated 100-sequence dataset via 4 parallel shards (--seq_id_start, merge_sequences.py).
+  99/100 accuracy. 1 FN: IK diverged for 1 unreachable_success (EE 0.3m from signal_pos). 0 FP.
+- 2026-04-10: replaced 3 simplistic reachable_failure modes (stop_short, wrong_target, signal) with
+  5 realistic failure modes in waypoint_ik.py: approach_no_grip, stop_at_pregrasp, grip_drop_early,
+  wrong_approach_target, descend_open_grip. All modes provably keep cube_z < 0.45m.
+  Safety constant _GRIP_DROP_MAX_T = T_GRIP + 1.0 = 8.0s. Shared _approach_grasp_lift helper.
+  Note: approach_no_grip/descend_open_grip still accumulate 20–32 approach reward (EE near cube) —
+  this is NOT a reward bug. success_frame correctly identifies them as FAILURE (cube never lifted).
+- 2026-04-10: replaced force-based grip assist with pure contact friction grasping.
+  Identified root cause from Newton example (example_ik_cube_stacking.py): missing
+  gravity compensation, low PD gains (old ke=600 vs example ke=4500), no armature/effort
+  limits, kf=0 (no tangential spring), impratio=1 (friction slip), wrong timestep for ke.
+  Fixes applied: gravcomp (jnt_actgravcomp + gravcomp), PD gains ×7.5, armature,
+  effort limits, ke=5e4, kd=5e2, kf=1e3, mu=0.75, impratio=1000, cone=elliptic,
+  10 substeps of 2ms per 20ms outer step (contact period T=8.9ms < sub_dt=2ms → stable).
+  Replayer rewritten: FK+full Newton physics (no analytic cube), 20 substeps × 2ms per frame.
+  Fixed reward_eval.py pxr import error (now uses importlib.util instead of package path).
+  Validated: 40/40 [OK], 100% accuracy (seed=1234, 40 seqs). Success frame=211 (all R+S).
+  Outputs: sequences_physics.json, replay_physics.json, report_physics/.

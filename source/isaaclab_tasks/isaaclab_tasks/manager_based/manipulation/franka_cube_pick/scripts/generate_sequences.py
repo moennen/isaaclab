@@ -58,7 +58,7 @@ import newton.ik as nik
 sys.path.insert(0, str(Path(__file__).parent))
 from _common.sampling import sample_cube_pos, sample_label
 from _common.sequence_schema import DEFAULT_CONFIG, label_description, save_sequences
-from _common.waypoint_ik import WaypointStateMachine, T_GRASP, T_GRIP, T_LIFT
+from _common.waypoint_ik import WaypointStateMachine, T_GRASP, T_GRIP
 
 _TASK_ROOT  = Path(__file__).parent.parent
 _OUTPUTS_DIR = _TASK_ROOT / "data" / "validation"
@@ -97,20 +97,32 @@ _PANDA_HAND_BODY_LABEL = "panda/panda_hand"
 _ARM_JOINT_IDS    = list(range(7))
 _FINGER_JOINT_IDS = [7, 8]
 
-# PD gains — arm joints 0-6, finger joints 7-8
-_ARM_KE    = [600, 600, 600, 600, 250, 150, 50]
-_ARM_KD    = [50,  50,  50,  50,  30,  25,  15]
-_FINGER_KE = [200, 200]  # PD joint stiffness for finger prismatic joints.
-_FINGER_KD = [20,  20]
+# PD gains — matching example_ik_cube_stacking.py (the Newton reference for this task).
+# High stiffness + gravity compensation = arm tracks IK target within ~1 mm.
+_ARM_KE          = [4500, 4500, 3500, 3500, 2000, 2000, 2000]
+_ARM_KD          = [450,  450,  350,  350,  200,  200,  200]
+_FINGER_KE       = [100,  100]
+_FINGER_KD       = [10,   10]
+_ARM_ARMATURE    = [0.30, 0.30, 0.30, 0.30, 0.11, 0.11, 0.11]
+_FINGER_ARMATURE = [0.15, 0.15]
+_ARM_EFFORT      = [87.0, 87.0, 87.0, 87.0, 12.0, 12.0, 12.0]
+_FINGER_EFFORT   = [100.0, 100.0]
 
-# Finger BOX contact stiffness.
-# Z-overlap at grasp ≈ 10 mm per finger. Normal force per finger = ke * overlap.
-# Required lift force: m*(g + v/dt) = 0.125*(9.81 + 0.35/0.02) ≈ 3.4 N total
-# → ke=100 gives 100*0.010*2 = 2 N < 3.4 N (INSUFFICIENT).
-# → ke=500 gives 500*0.010*2 = 10 N >> 3.4 N (sufficient).
-# Risk: lateral impulse from 3mm centering error ≈ 500*0.003*mu=2 ≈ 3 N (acceptable).
-_FINGER_BOX_KE = 500.0
-_FINGER_BOX_KD = 5.0
+# Contact parameters — matching example_ik_cube_stacking.py.
+# ke=5e4: strong normal spring → enough normal force at small penetration.
+# kf=1e3: tangential spring → resists sliding within the friction cone.
+# mu=0.75: sufficient with impratio=1000 (friction near-rigid constraint).
+_CONTACT_KE  = 5.0e4   # N/m   normal spring stiffness
+_CONTACT_KD  = 5.0e2   # N·s/m normal damping
+_CONTACT_KF  = 1.0e3   # N/m   tangential (friction) spring stiffness
+_CONTACT_MU  = 0.75    # friction coefficient
+
+# Number of physics substeps per 20ms frame.
+# ke=5e4, m=0.1kg → ω_n=707 rad/s → contact period T=8.9ms.
+# dt=20ms > T causes large impulses from small overlaps.
+# 10 substeps → sub_dt=2ms < T → numerically stable.
+# Matches example_ik_cube_stacking.py (sim_substeps=10, sim_dt=1.67ms).
+_N_SUBSTEPS = 10
 
 # Finger open/close positions [m]
 _FINGER_OPEN  = 0.04
@@ -120,12 +132,9 @@ _FINGER_CLOSE = 0.0
 _N_ROBOT_JOINTS = 9
 
 # Cube rigid body properties
-_CUBE_HALF_SIZE  = 0.025    # half-extent per axis [m] → 5 cm cube
-_CUBE_DENSITY    = 1000.0  # kg/m³ → mass = 1000 × 0.05³ = 0.125 kg (125 g)
-_CUBE_MASS       = _CUBE_DENSITY * (2 * 0.025) ** 3   # 0.125 kg
-_CUBE_FRICTION   = 2.0      # Coulomb friction coeff for cube shape (floor contact)
-_FINGER_FRICTION = 2.0      # Friction on finger BOX: must be high enough to grip cube during transport
-_CUBE_CONTACT_KE = 10000.0  # contact stiffness [N/m] for cube-floor (keep stiff for stability)
+_CUBE_HALF_SIZE = 0.025    # half-extent per axis [m] → 5 cm cube
+_CUBE_DENSITY   = 400.0    # kg/m³ — midpoint of example range (300-500)
+_CUBE_MASS      = _CUBE_DENSITY * (2 * _CUBE_HALF_SIZE) ** 3   # 0.100 kg
 
 
 
@@ -141,93 +150,58 @@ def build_models(urdf_path: Path):
         phys_model:     robot + cube Newton Model used by the physics solver
         hand_idx:       body index of panda_hand (same in both models)
         cube_body_idx:  body index of the cube in phys_model
-        solver:         Newton solver for phys_model (MuJoCo preferred)
+        solver:         Newton solver for phys_model
     """
-    # ---- IK model (robot only, no PD gains needed) -------------------------
+    # ---- IK model (robot only) -----------------------------------------------
     mb_ik = newton.ModelBuilder()
     mb_ik.add_ground_plane()
-    mb_ik.add_urdf(str(urdf_path), floating=False)
+    mb_ik.add_urdf(str(urdf_path), floating=False, enable_self_collisions=False,
+                   parse_visuals_as_colliders=False)
     ik_model = mb_ik.finalize()
 
     hand_idx = next(
         i for i, l in enumerate(mb_ik.body_label) if _PANDA_HAND_BODY_LABEL in l
     )
 
-    # ---- Physics model (robot + cube) --------------------------------------
+    # ---- Physics model (robot + cube) ----------------------------------------
     mb_phys = newton.ModelBuilder()
+    newton.solvers.SolverMuJoCo.register_custom_attributes(mb_phys)
     mb_phys.add_ground_plane()
-    # Leave ground friction at default (mu=1.0) — setting it high (>2.0) causes MuJoCo
-    # contact instability (cube penetrates floor). Instead, the low finger ke=20 limits
-    # the asymmetric push force to keep the cube stationary during closure.
-    mb_phys.add_urdf(str(urdf_path), floating=False)
+    mb_phys.add_urdf(str(urdf_path), floating=False, enable_self_collisions=False,
+                     parse_visuals_as_colliders=False)
 
-    # Collision group assignment.
-    # Newton/MuJoCo collision rule: shapes collide IFF they are in the SAME group.
-    #   group 1 (default): ground + finger BOX shapes + cube → mutual contact
-    #   group 2:           arm/hand shapes + finger MESH shapes → isolated
-    #
-    # IMPORTANT: Newton/mujoco_warp does NOT support MESH-BOX contact detection.
-    # The URDF finger shapes (MESH type) pass silently through the cube BOX.
-    # Fix: move MESH finger shapes to group 2 (non-colliding) and add explicit
-    # BOX approximations of the fingers in group 1 for reliable BOX-BOX contact.
-    _finger_body_set = {
-        i for i, lbl in enumerate(mb_phys.body_label)
-        if "leftfinger" in lbl or "rightfinger" in lbl
-    }
+    # ---- Gravity compensation ------------------------------------------------
+    # Without gravcomp the PD fights link weight → tracking errors during grasp/lift.
+    gravcomp_dof = mb_phys.custom_attributes["mujoco:jnt_actgravcomp"]
+    if gravcomp_dof.values is None:
+        gravcomp_dof.values = {}
+    for dof_idx in range(7):   # arm DOFs 0-6 only
+        gravcomp_dof.values[dof_idx] = True
+
+    gravcomp_body = mb_phys.custom_attributes["mujoco:gravcomp"]
+    if gravcomp_body.values is None:
+        gravcomp_body.values = {}
+    for body_idx in range(2, len(mb_phys.body_label)):   # skip world (0) and fixed base (1)
+        gravcomp_body.values[body_idx] = 1.0
+
+    # ---- Collision group assignment ------------------------------------------
+    # Move all URDF shapes to group 2 (mesh-based, not BOX-detectable by Newton).
+    # Explicit BOX finger shapes added below in group 1 for BOX-BOX contact.
     _left_finger_body  = next(i for i, lbl in enumerate(mb_phys.body_label) if "leftfinger"  in lbl)
     _right_finger_body = next(i for i, lbl in enumerate(mb_phys.body_label) if "rightfinger" in lbl)
+    for _i in range(len(mb_phys.shape_body)):
+        if mb_phys.shape_body[_i] >= 0:   # skip ground (body=-1)
+            mb_phys.shape_collision_group[_i] = 2
 
-    _n_urdf_shapes = len(mb_phys.shape_body)
-    for _i in range(_n_urdf_shapes):
-        _b = mb_phys.shape_body[_i]
-        if _b < 0:
-            pass  # ground: keep group 1
-        else:
-            mb_phys.shape_collision_group[_i] = 2   # arm, hand, AND finger MESH shapes: group 2
-
-    # Add BOX collision shapes for each finger body (group 1).
-    # panda finger.stl mesh bounds in link frame:
-    #   leftfinger:  X=[-0.0104,0.0106], Y=[0.0001,0.0262], Z=[0,0.054]
-    #   rightfinger: Y-negated (180° Z rotation) → Y=[-0.0262,-0.0001]
-    # Inner gripping face is at Y=0 in link frame for both fingers.
-    # With GRASP_QUAT (hand pointing down), link local Y → world -Y.
-    # Newton/mujoco_warp does NOT detect MESH-BOX contact, so we add explicit
-    # BOX approximations of the fingers in group 1 for reliable BOX-BOX friction grasping.
+    # ---- Finger BOX shapes ---------------------------------------------------
+    # Squeeze-mode geometry: SAT Z_pen=41mm >> Y_pen=15mm → Y-normal contact.
+    # Squeeze normal × mu friction in Z lifts cube. Wide hx tolerates XY drift.
     _cfg_fbox = newton.ModelBuilder.ShapeConfig()
-    _cfg_fbox.ke = _FINGER_BOX_KE
-    _cfg_fbox.kd = _FINGER_BOX_KD
-    _cfg_fbox.mu = _FINGER_FRICTION   # contact friction with cube = min(_FINGER_FRICTION, _CUBE_FRICTION)
+    _cfg_fbox.ke = _CONTACT_KE
+    _cfg_fbox.kd = _CONTACT_KD
+    _cfg_fbox.kf = _CONTACT_KF
+    _cfg_fbox.mu = _CONTACT_MU
 
-    # Finger BOX geometry — SQUEEZE mode, wide-coverage variant.
-    #
-    # Coordinate frame: GRASP_QUAT (180° around X) maps local_Z→world −Z, local_Y→world −Y.
-    # Finger origin in world = hand_pos + [0, ∓q, −0.0584]  (left:−Y when q>0, right:+Y)
-    #
-    # Design goals:
-    #   1. SAT contact axis = Y (squeeze), NOT Z (shelf). Requires Z_pen > Y_pen.
-    #   2. Squeeze mode maintained even when arm drifts ±50mm in XY during lift.
-    #   3. BOX bottom stays above floor (group 1 floor will register BOX-floor contacts).
-    #
-    # Key parameters:
-    #   local_Z = 0.027 m  → BOX_center_Z = EE_Z − 0.0584 − 0.027 = EE_Z − 0.0854
-    #   At EE_Z = 0.110 m (actual grasp): BOX_center_Z = 0.0246 m ≈ cube_Z (0.023 m)
-    #   hz     = 0.018 m  → BOX_bottom at EE=0.105 m: 0.105−0.0584−0.027−0.018=0.0016 m ✓
-    #   hx     = 0.025 m  → covers cube half-width; cube can drift ±50 mm in X (vs ±36 mm
-    #                        with hx=0.0105) before X-contact is lost during lift.
-    #
-    # SAT penetration at actual grasp (EE=0.110 m, q=0.010 m, cube centred):
-    #   Z: (hz + cube_hz) − |BOX_Z − cube_Z| = (0.018+0.025) − 0.0016 = 41.4 mm
-    #   Y: (hy + cube_hy) − |BOX_Y − cube_Y| = (0.013+0.025) − 0.013  = 15.0 mm  ← minimum
-    #   X: (hx + cube_hx) − 0               = (0.025+0.025)            = 50.0 mm
-    #
-    # 15 mm < 41 mm < 50 mm → SAT picks Y (minimum) → SQUEEZE contact ✓
-    #
-    # Squeeze normal force (Y direction) × μ_friction in Z lifts the cube.
-    # Wide hx ensures squeeze contact persists even when the cube drifts in X/Y
-    # due to arm kinematic coupling during lift, preventing cube escape.
-    #
-    # Contact onset: Y overlap appears only when q < 0.025 m (cube half-width) → no
-    # spurious contact during open-finger approach phase. ✓
     mb_phys.add_shape_box(
         body=_left_finger_body,
         xform=wp.transform(wp.vec3(0.0, 0.013, 0.027), wp.quat_identity()),
@@ -237,7 +211,6 @@ def build_models(urdf_path: Path):
     )
     mb_phys.shape_collision_group[len(mb_phys.shape_body) - 1] = 1
 
-    # Right finger: same geometry, Y-negated (right_finger local Y → world +Y)
     mb_phys.add_shape_box(
         body=_right_finger_body,
         xform=wp.transform(wp.vec3(0.0, -0.013, 0.027), wp.quat_identity()),
@@ -247,41 +220,50 @@ def build_models(urdf_path: Path):
     )
     mb_phys.shape_collision_group[len(mb_phys.shape_body) - 1] = 1
 
-    # PD gains for robot joints (indexed assignment — safe against reference aliasing)
-    for i, (ke, kd) in enumerate(zip(_ARM_KE + _FINGER_KE, _ARM_KD + _FINGER_KD)):
-        mb_phys.joint_target_ke[i] = float(ke)
-        mb_phys.joint_target_kd[i] = float(kd)
+    # ---- PD gains + armature + effort limits ---------------------------------
+    all_ke     = _ARM_KE      + _FINGER_KE
+    all_kd     = _ARM_KD      + _FINGER_KD
+    all_arm    = _ARM_ARMATURE + _FINGER_ARMATURE
+    all_effort = _ARM_EFFORT  + _FINGER_EFFORT
+    for i in range(_N_ROBOT_JOINTS):
+        mb_phys.joint_target_ke[i]    = float(all_ke[i])
+        mb_phys.joint_target_kd[i]    = float(all_kd[i])
+        mb_phys.joint_armature[i]     = float(all_arm[i])
+        mb_phys.joint_effort_limit[i] = float(all_effort[i])
 
-    # Add cube as a free-floating rigid body.
-    # add_body() implicitly adds a free joint (7 DOF: tx,ty,tz,qx,qy,qz,qw).
-    # Do NOT call add_joint_free separately — that would add a second free joint.
-    # joint_q layout after finalize: [robot_0..8, cube_tx, cube_ty, cube_tz, cube_qx, cube_qy, cube_qz, cube_qw]
-    cube_body_idx = mb_phys.add_body(mass=0.0, label="cube")   # mass from ShapeConfig.density
-    cfg_cube = newton.ModelBuilder.ShapeConfig()
+    # ---- Cube rigid body -----------------------------------------------------
+    cfg_cube         = newton.ModelBuilder.ShapeConfig()
     cfg_cube.density = _CUBE_DENSITY
-    cfg_cube.mu      = _CUBE_FRICTION
-    cfg_cube.ke      = _CUBE_CONTACT_KE
+    cfg_cube.ke      = _CONTACT_KE
+    cfg_cube.kd      = _CONTACT_KD
+    cfg_cube.kf      = _CONTACT_KF
+    cfg_cube.mu      = _CONTACT_MU
+
+    cube_body_idx = mb_phys.add_body(mass=0.0, label="cube")
     mb_phys.add_shape_box(
         body=cube_body_idx,
         hx=_CUBE_HALF_SIZE, hy=_CUBE_HALF_SIZE, hz=_CUBE_HALF_SIZE,
         cfg=cfg_cube,
         label="cube_shape",
     )
-    # Cube in group 1 (same as fingers and ground) → cube-finger and cube-ground contact active.
-    # Arm/hand (group 2) is different from cube (group 1) → arm won't collide with cube.
-    # (No explicit assignment needed since group 1 is the default; written for clarity.)
     mb_phys.shape_collision_group[len(mb_phys.shape_body) - 1] = 1
 
     phys_model = mb_phys.finalize()
 
-    # Prefer MuJoCo solver; fall back to Featherstone.
-    # njmax: BOX-BOX contacts (finger×cube) generate many constraint equations
-    # (up to 5 per contact point × 8 contact points per pair × 2 fingers = 80).
-    # Set njmax=256 to prevent nefc overflow warnings and dropped constraints.
-    try:
-        solver = newton.solvers.SolverMuJoCo(phys_model, njmax=256)
-    except Exception:
-        solver = newton.solvers.SolverFeatherstone(phys_model)
+    # ---- Solver — parameters mirror example_ik_cube_stacking.py -------------
+    # impratio=1000: friction near-rigid → cube stays gripped during arm motion.
+    # cone=elliptic: accurate 3D friction cone.
+    solver = newton.solvers.SolverMuJoCo(
+        phys_model,
+        solver="newton",
+        integrator="implicitfast",
+        iterations=20,
+        ls_iterations=100,
+        nconmax=512,
+        njmax=1000,
+        cone="elliptic",
+        impratio=1000.0,
+    )
 
     return ik_model, phys_model, hand_idx, cube_body_idx, solver
 
@@ -538,24 +520,6 @@ def run_one_episode(
     # Live cube position (updated from physics each step).
     cube_pos_arr = cube_init_arr.copy()
 
-    # Arm-freeze: for reachable+success, once the gripper starts closing (t >= T_GRASP)
-    # the arm joint cmd is frozen at the last IK solution. This prevents small IK
-    # variations from creating arm XY motion that, via friction, drags the cube sideways
-    # and moves it outside the finger BOX contact zone before lift.
-    _frozen_arm_q = None   # (7,) array, set once at T_GRASP
-
-    # XYZ-freeze during lift: at T_GRIP the waypoint returns grasp_pos_Z (0.105m) but the
-    # actual EE is at ~0.110m. This 5mm downward IK target causes the arm to jerk DOWN,
-    # and the XY retargeting (cube_init.XY vs actual EE.XY, typically 5-10mm off) causes
-    # lateral impulses. Both effects transmit through high-friction Y-squeeze contact and
-    # fling the cube sideways.
-    # Fix: at T_GRIP, capture the actual EE position (prev_ee_pos) and use it as the
-    # starting point for a smooth Z-only lift interpolation. The IK target at T_GRIP is
-    # EXACTLY the current EE position (zero transient). Over [T_GRIP, T_LIFT], the IK
-    # target Z slowly increases to lift_ee_target_z=0.65m (same ease-in as the waypoint).
-    _lift_ee_xy = None     # [x, y] captured from prev_ee_pos at T_GRIP
-    _lift_ee_z0 = None     # EE Z at T_GRIP (actual, not waypoint) — lift starts from here
-
     frames = []
 
     # Diagnostic: track cube knock events (cube moves >1cm in one step)
@@ -570,24 +534,6 @@ def run_one_episode(
         ee_target = ee_pos_t.tolist()
         quat_wxyz = quat.tolist()   # [w, x, y, z]
 
-        # ---- XY-freeze during lift (reachable+success, T_GRIP ≤ t < T_LIFT) -----
-        # At T_GRIP, capture the EE XY from the LAST FROZEN step (prev_ee_pos is the
-        # EE position after the previous physics step = the final arm-frozen position).
-        # Thereafter override the IK target XY to this frozen value so the arm only
-        # moves in Z during lift. The cube is lifted by Z-direction friction from the
-        # Y-squeeze contact. Without this fix: the lift IK retargets to cube_init.XY
-        # (5-10 mm from current EE XY) → 27mm cube X displacement via friction.
-        if label["reachable"] and label["success"]:
-            if t >= T_GRIP and _lift_ee_xy is None and prev_ee_pos is not None:
-                _lift_ee_xy = [float(prev_ee_pos[0]), float(prev_ee_pos[1])]
-                _lift_ee_z0 = float(prev_ee_pos[2])
-            if _lift_ee_xy is not None and t < T_LIFT:
-                alpha = (t - T_GRIP) / (T_LIFT - T_GRIP)
-                slow_alpha = alpha * alpha   # ease-in matching waypoint
-                lift_target_z = cfg.get("lift_ee_target_z", 0.65)
-                target_z = _lift_ee_z0 + slow_alpha * (lift_target_z - _lift_ee_z0)
-                ee_target = [_lift_ee_xy[0], _lift_ee_xy[1], target_z]
-
         # IK on robot-only model, warm-started from current robot joints.
         # robot_q_after from the previous step == pre-step joints of this step
         # (no state change between iterations), so reuse it without a second sync.
@@ -595,8 +541,6 @@ def run_one_episode(
         joint_pos_cmd = solve_ik_single(ik_model, hand_idx, ee_target, robot_q_now, quat_wxyz)
 
         # ---- Finger centering correction (reachable+success, approach only) ---
-        # Applied only while the EE is approaching (t < T_GRASP). Once the gripper
-        # starts closing, the arm is frozen — see arm-freeze logic below.
         if label["reachable"] and label["success"] and t < T_GRASP:
             ee_arr = np.array(ee_target, dtype=np.float32)
             ee_dist = float(np.linalg.norm(ee_arr - cube_pos_arr))
@@ -612,19 +556,6 @@ def run_one_episode(
                         ik_model, hand_idx, corrected_target, joint_pos_cmd, None
                     )
 
-        # ---- Arm freeze during gripper closing (reachable+success) -------------
-        # From T_GRASP (fingers start closing) to T_GRIP (fully closed), freeze the
-        # arm at the IK solution captured just as closing begins. This prevents
-        # per-step IK variation from creating small arm XY movements that drag the
-        # cube sideways via friction (which would move the cube out of grip range).
-        if label["reachable"] and label["success"]:
-            if t >= T_GRASP and _frozen_arm_q is None:
-                # Capture current arm solution the first time T_GRASP is crossed.
-                _frozen_arm_q = joint_pos_cmd[:7].copy()
-            if _frozen_arm_q is not None and t < T_GRIP:
-                # Hold arm fixed; only finger positions advance.
-                joint_pos_cmd[:7] = _frozen_arm_q
-
         joint_pos_cmd[7] = finger_cmd
         joint_pos_cmd[8] = finger_cmd
 
@@ -637,14 +568,15 @@ def run_one_episode(
         cmd_full[:_N_ROBOT_JOINTS] = joint_pos_cmd
         control.joint_target_pos = wp.array(cmd_full, dtype=wp.float32)
 
-        # Physics step
+        # Physics substep loop — sub_dt=2ms keeps contact numerically stable.
         state_0.clear_forces()
-
-        if contacts is not None:
-            solver.step(state_0, state_1, control, contacts, dt)
-        else:
-            solver.step(state_0, state_1, control, None, dt)
-        state_0, state_1 = state_1, state_0
+        sub_dt = dt / _N_SUBSTEPS
+        for _sub in range(_N_SUBSTEPS):
+            if contacts is not None:
+                solver.step(state_0, state_1, control, contacts, sub_dt)
+            else:
+                solver.step(state_0, state_1, control, None, sub_dt)
+            state_0, state_1 = state_1, state_0
 
         # FK → read actual EE + cube positions from body transforms
         newton.eval_fk(phys_model, state_0.joint_q, state_0.joint_qd, state_0)
@@ -693,18 +625,6 @@ def run_one_episode(
                 "cube_pos_w":     cube_pos_now,
             })
 
-        # ---- Lift-phase Z diagnostic (every 0.5s during T_GRIP→end) -----------
-        if label["reachable"] and label["success"] and t >= T_GRIP and step % 25 == 0:
-            _all_q   = state_0.joint_q.numpy()
-            _f1      = float(_all_q[7])
-            _f2      = float(_all_q[8])
-            _box_z_left  = float(ee_pos_now[1] if False else ee_pos_now[2]) - 0.0854
-            print(
-                f"    [LIFT t={t:.2f}s] ee_z={ee_pos_now[2]:.4f}m  cube_z={cube_pos_now[2]:.4f}m"
-                f"  fingers=({_f1:.4f},{_f2:.4f})m  ee_xy=({ee_pos_now[0]:.4f},{ee_pos_now[1]:.4f})"
-                f"  cube_xy=({cube_pos_now[0]:.4f},{cube_pos_now[1]:.4f})"
-            )
-
         prev_robot_q = robot_q_after.copy()
         prev_ee_pos  = ee_pos_now
         cube_pos_arr = cube_pos_arr_now
@@ -726,7 +646,10 @@ def run_one_episode(
 def generate_sequences(args):
     import torch
 
-    random.seed(args.seed)
+    # When running parallel shards, each shard uses seed = base_seed + seq_id_start
+    # so that shards produce non-overlapping random sequences while remaining reproducible.
+    effective_seed = args.seed + args.seq_id_start
+    random.seed(effective_seed)
 
     cfg = DEFAULT_CONFIG
     dt = 0.02         # 50 Hz — fine enough for all phase transitions
@@ -740,7 +663,8 @@ def generate_sequences(args):
     print(f"[generate] IK model:   {ik_model.body_count} bodies, {ik_model.joint_coord_count} joint coords")
     print(f"[generate] Phys model: {phys_model.body_count} bodies, {phys_model.joint_coord_count} joint coords (robot + cube free joint)")
     print(f"[generate] Solver: {type(solver).__name__}")
-    print(f"[generate] Simulating {args.num_sequences} sequences "
+    id_range = f"seq_{args.seq_id_start:04d}..seq_{args.seq_id_start + args.num_sequences - 1:04d}"
+    print(f"[generate] Simulating {args.num_sequences} sequences ({id_range}) "
           f"({steps_per_ep} steps × {dt:.3f}s = {T_END:.1f}s each, "
           f"recording every {RECORD_EVERY} steps → {steps_per_ep // RECORD_EVERY} frames)")
 
@@ -749,7 +673,8 @@ def generate_sequences(args):
     for seq_idx in range(args.num_sequences):
         label = sample_label(args.reachable_ratio, args.success_ratio)
         cube_pos_t = sample_cube_pos(label, cfg, torch.device("cpu"))
-        seq_id = f"seq_{seq_idx:04d}"
+        global_seq_idx = args.seq_id_start + seq_idx
+        seq_id = f"seq_{global_seq_idx:04d}"
 
         lbl_str = label_description(label)
         print(f"[generate] {seq_idx + 1}/{args.num_sequences} — {seq_id} ({lbl_str})",
@@ -809,6 +734,9 @@ def main():
     parser.add_argument("--reachable_ratio", type=float, default=0.7)
     parser.add_argument("--success_ratio",   type=float, default=0.5)
     parser.add_argument("--seed",            type=int,   default=42)
+    parser.add_argument("--seq_id_start",    type=int,   default=0,
+                        help="Start seq IDs at this offset (for parallel shards). "
+                             "Effective seed = seed + seq_id_start.")
     args = parser.parse_args()
 
     generate_sequences(args)

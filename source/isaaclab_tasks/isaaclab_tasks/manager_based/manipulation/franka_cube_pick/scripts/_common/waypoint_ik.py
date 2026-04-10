@@ -12,25 +12,48 @@ Quaternions are [w, x, y, z].
   NEUTRAL_QUAT = [1.0, 0.0, 0.0, 0.0]  — gripper neutral (for signal pose)
 
 Reachable + Success (happy path):
-  t∈[0, T0):  HOME  → PRE_GRASP  (above cube, gripper open)
-  t∈[T0, T1): PRE_GRASP → GRASP  (at grasp height above cube centre, gripper open→close)
-  t∈[T1, T2): GRASP → LIFT       (cube_xy + [0, 0, lift_height], gripper closed)
-  t∈[T2, end): LIFT → SUCCESS    (success_ee_pos, gripper closed)
+  t∈[0, T_APPROACH):  HOME → PRE_GRASP (above cube, gripper open)
+  t∈[T_APPROACH, T_DWELL): hold PRE_GRASP (PD converges in XY)
+  t∈[T_DWELL, T_GRASP): PRE_GRASP → GRASP (descent, fingers OPEN — no knock)
+  t∈[T_GRASP, T_GRIP): hold GRASP height, fingers CLOSE (2.5 s to fully close)
+  t∈[T_GRIP, T_LIFT): GRASP → LIFT (ease-in α² — slow lift off)
+  t∈[T_LIFT, end): LIFT → SUCCESS (success_ee_pos, gripper closed)
 
-Reachable + Failure (robot goes to wrong target — diversified failure modes):
-  Three modes chosen randomly at init:
-    "stop_short" (40%): approach cube but stop at a random fraction of the way
-    "wrong_target" (40%): move to a random reachable point far from the cube
-    "signal" (20%): current behavior (go to signal_pos)
+Reachable + Failure (realistic attempts that fail — all stay below lift_height=0.45m
+  so the reward stays LOW and classification is unambiguous):
+
+  "approach_no_grip"  (20%): Full correct trajectory (approach → descend → lift pose →
+    transit to success_pos) but gripper stays OPEN throughout.  Robot ends at success_pos
+    holding nothing.  Simulates: correct motion but gripper hardware failure.
+    → reward LOW: cube never lifted (stays on floor)
+
+  "stop_at_pregrasp"  (20%): Approaches correctly above the cube (pre_grasp position),
+    then stops and holds there.  Never descends to grasp height.  Robot is in correct
+    XY above cube but never contacts it.
+    → reward LOW: cube never contacted
+
+  "grip_drop_early"  (20%): Full approach → grip → begin lifting → open gripper at a
+    random time T_GRIP + 0.2 to T_GRIP + 1.0s (= 7.2–8.0s), well before the cube can
+    reach lift_height.  Cube is lifted a few cm then falls.
+    → reward LOW: cube_z never exceeds 0.45m (lift EE target reaches 0.45m only at ~8.2s)
+
+  "wrong_approach_target"  (20%): Robot goes to a random reachable position that is far
+    from the cube — never contacts it — then holds that position.
+    → reward LOW: cube never contacted
+
+  "descend_open_grip"  (20%): Full correct descent to grasp height, holds there with
+    gripper OPEN (touches or nearly touches cube but no friction grip), then retreats
+    to a neutral position.  Simulates a mis-timed or mis-sized grasp.
+    → reward LOW: cube is at most displaced slightly, never lifted
 
 Unreachable + Success (robot correctly goes to signal position):
-  Optional hesitation (50%): first move toward cube for 1–2.5 s, then redirect to signal_pos.
-  t∈[0, T0):  HOME → SIGNAL_POS (with optional cube-direction detour before redirect)
-  rest:        hold SIGNAL_POS
+  Optional hesitation (50%): first move toward cube for 1–2.5 s, then redirect.
+  t∈[0, T_APPROACH):  HOME → SIGNAL_POS (with optional cube-direction detour)
+  rest:                hold SIGNAL_POS
 
 Unreachable + Failure (robot tries to reach cube — which it can't get to):
-  t∈[0, T0):  HOME → attempted approach above unreachable cube
-  rest:        hold that position
+  t∈[0, T_APPROACH):  HOME → attempted approach above unreachable cube
+  rest:                hold that position
 """
 
 from __future__ import annotations
@@ -49,10 +72,14 @@ T_APPROACH   = 2.0   # end of home→pre-grasp phase
 T_DWELL      = 3.0   # end of dwell at pre-grasp (1 s: PD converges in XY before descent)
 T_GRASP      = 4.5   # end of pre-grasp→grasp descent (fingers OPEN throughout)
 T_GRIP       = 7.0   # end of grasp-height dwell (2.5 s for fingers to fully close against cube)
-                     # Data shows ke_finger=20 with coupled arm inertia takes ~2.5 s to close
+                     # Data shows ke_finger=100 with coupled arm inertia takes ~2.5 s to close
                      # 40 mm against the cube; starting lift before full closure drops the cube.
 T_LIFT       = 8.5   # end of grasp→lift phase (1.5 s to reach lift_ee_target_z=0.65 m)
 # T_SUCCESS  = 10.0  # episode end (1.5 s at success/signal position)
+
+# Safety margin: EE target reaches lift_height (0.45m) at ~t=8.19s (from ease-in geometry).
+# Drop before this time to guarantee cube never reaches lift_height → reward stays LOW.
+_GRIP_DROP_MAX_T = T_GRIP + 1.0   # = 8.0s — safe upper bound
 
 GRIPPER_OPEN  = 0.04   # metres per finger
 GRIPPER_CLOSE = 0.0    # metres per finger
@@ -107,7 +134,6 @@ class WaypointStateMachine:
         self.approach_h      = cfg["grasp_approach_height"]
         self.lift_height     = cfg["lift_height"]          # reward threshold z [m]
         self.lift_ee_target_z = cfg.get("lift_ee_target_z", self.lift_height + 0.1)
-        # IK targets lift_ee_target_z (> lift_height) to compensate PD tracking lag
         self.grasp_quat  = GRASP_QUAT.to(device)
         self.neutral_quat = NEUTRAL_QUAT.to(device)
 
@@ -119,19 +145,32 @@ class WaypointStateMachine:
         self.pre_grasp_pos[2] = self.cube_pos[2] + self.approach_h
 
         # Grasp EE target: panda_hand centre stops grasp_ee_height above cube centre
-        # (fingers extend ~10 cm below panda_hand; 8 cm clearance keeps them above ground)
         grasp_ee_height = cfg.get("grasp_ee_height", 0.08)
         self.grasp_pos = self.cube_pos.clone()
         self.grasp_pos[2] = self.cube_pos[2] + grasp_ee_height
 
+        # Lift target
+        self._lift_pos = self.cube_pos.clone()
+        self._lift_pos[2] = self.lift_ee_target_z
+
         # ---- Reachable failure mode (chosen randomly at init) ----------------
-        # Three modes: "stop_short" (40%), "wrong_target" (40%), "signal" (20%)
-        _mode_roll = random.random()
-        if _mode_roll < 0.40:
-            self._failure_mode = "stop_short"
-            self._stop_fraction = random.uniform(0.5, 0.85)
-        elif _mode_roll < 0.80:
-            self._failure_mode = "wrong_target"
+        # Five modes — all keep cube_z below lift_height=0.45m → reward stays LOW.
+        _modes = [
+            "approach_no_grip",      # correct motion, gripper never closes
+            "stop_at_pregrasp",      # stops above cube, never descends
+            "grip_drop_early",       # grips and briefly lifts, drops before 0.45m
+            "wrong_approach_target", # goes to random position far from cube
+            "descend_open_grip",     # descends to grasp height but gripper stays open
+        ]
+        self._failure_mode = random.choice(_modes)
+
+        if self._failure_mode == "grip_drop_early":
+            # Drop time: T_GRIP + 0.2 to T_GRIP + 1.0s = 7.2–8.0s.
+            # EE target reaches 0.45m at ~8.19s (ease-in geometry) so this is safely below.
+            self._drop_time = random.uniform(T_GRIP + 0.2, _GRIP_DROP_MAX_T)
+
+        elif self._failure_mode == "wrong_approach_target":
+            # Random reachable point not near cube, moderate height
             r_min = cfg.get("reachable_radius_min", 0.22)
             r_max = cfg.get("reachable_radius_max", 0.65)
             angle = random.uniform(0.0, 2.0 * math.pi)
@@ -142,8 +181,9 @@ class WaypointStateMachine:
                 device=device,
                 dtype=torch.float32,
             )
-        else:
-            self._failure_mode = "signal"
+
+        # Neutral retreat target for descend_open_grip (back toward home, mid-height)
+        self._retreat_pos = self.home_pos.clone()
 
         # ---- Unreachable success hesitation (50% of sequences) ---------------
         if random.random() < 0.5:
@@ -152,10 +192,7 @@ class WaypointStateMachine:
             self._hesitate_end = 0.0  # no hesitation
 
     def get_target(self, t: float) -> tuple[torch.Tensor, torch.Tensor, float]:
-        """Return (ee_pos_b (3,), ee_quat_wxyz (4,), finger_pos (float)).
-
-        This is called once per env per simulation step.
-        """
+        """Return (ee_pos_b (3,), ee_quat_wxyz (4,), finger_pos (float))."""
         reachable = self.label["reachable"]
         success   = self.label["success"]
 
@@ -168,94 +205,109 @@ class WaypointStateMachine:
         else:
             return self._unreachable_failure(t)
 
-    # ---- scenario implementations ----------------------------------------
+    # ---- shared helper: success-style approach+grasp+lift -------------------
 
-    def _reachable_success(self, t: float):
-        """Full pick: approach → pre-grasp dwell → descent → grasp dwell → lift → success.
+    def _approach_grasp_lift(self, t: float) -> tuple[torch.Tensor, float]:
+        """Full pick sub-trajectory: approach → dwell → descent → grip dwell → lift → transit.
 
-        Fingers stay OPEN through the entire descent so they don't knock the cube.
-        They close only during the grasp-height dwell, after the PD controller has
-        had 1 s to centre the arm over the cube before gripping.
+        Shared by _reachable_success and failure modes that start with a realistic pick.
         """
         if t < T_APPROACH:
             alpha = _phase_alpha(t, 0.0, T_APPROACH)
             pos = _slerp_pos(self.home_pos, self.pre_grasp_pos, alpha)
-            quat = self.grasp_quat
             finger = GRIPPER_OPEN
         elif t < T_DWELL:
-            # Hold at pre_grasp — PD arm converges in XY before descent.
             pos = self.pre_grasp_pos
-            quat = self.grasp_quat
             finger = GRIPPER_OPEN
         elif t < T_GRASP:
-            # Descend to grasp height with fingers OPEN — no cube contact during descent.
             alpha = _phase_alpha(t, T_DWELL, T_GRASP)
             pos = _slerp_pos(self.pre_grasp_pos, self.grasp_pos, alpha)
-            quat = self.grasp_quat
             finger = GRIPPER_OPEN
         elif t < T_GRIP:
-            # Hold at grasp height — PD arm converges in XY, then fingers close.
-            # Closing at grasp height ensures finger inner face straddles the cube.
             pos = self.grasp_pos
-            quat = self.grasp_quat
             finger = GRIPPER_CLOSE
         elif t < T_LIFT:
             alpha = _phase_alpha(t, T_GRIP, T_LIFT)
-            # Ease-in (α²): very slow start lets the cube detach from the floor
-            # gradually rather than receiving a large impulsive lateral force from
-            # the abrupt constraint-topology change at T_GRIP.
-            # At t=T_GRIP+0.08s: 1.5 mm above grasp (vs 7 mm with linear), so
-            # contact forces ramp up slowly until the cube lifts off the ground.
-            slow_alpha = alpha * alpha
-            lift_pos = self.cube_pos.clone()
-            lift_pos[2] = self.lift_ee_target_z   # aim above threshold to compensate lag
-            pos = _slerp_pos(self.grasp_pos, lift_pos, slow_alpha)
-            quat = self.grasp_quat
+            slow_alpha = alpha * alpha   # ease-in
+            pos = _slerp_pos(self.grasp_pos, self._lift_pos, slow_alpha)
             finger = GRIPPER_CLOSE
         else:
             alpha = _phase_alpha(t, T_LIFT, 10.0)
-            lift_pos = self.cube_pos.clone()
-            lift_pos[2] = self.lift_ee_target_z
-            pos = _slerp_pos(lift_pos, self.success_pos, alpha)
-            quat = self.grasp_quat
+            pos = _slerp_pos(self._lift_pos, self.success_pos, alpha)
             finger = GRIPPER_CLOSE
-        return pos, quat, finger
+        return pos, finger
+
+    # ---- scenario implementations -------------------------------------------
+
+    def _reachable_success(self, t: float):
+        """Full pick: approach → dwell → descent → grip → lift → success."""
+        pos, finger = self._approach_grasp_lift(t)
+        return pos, self.grasp_quat, finger
 
     def _reachable_failure(self, t: float):
-        """Reachable cube but robot goes to wrong target — three failure modes."""
-        if self._failure_mode == "stop_short":
-            # Approach cube but stop at a random fraction of the way
-            intermediate = _slerp_pos(self.home_pos, self.pre_grasp_pos, self._stop_fraction)
-            alpha = _phase_alpha(t, 0.0, T_APPROACH)
-            pos = _slerp_pos(self.home_pos, intermediate, alpha)
-        elif self._failure_mode == "wrong_target":
-            # Move to a random reachable point far from the cube
+        """Realistic failure — cube never lifted above 0.45m → reward stays LOW."""
+
+        if self._failure_mode == "approach_no_grip":
+            # Full correct trajectory but gripper always open.
+            # Robot ends at success_pos, cube stays on floor.
+            pos, _ = self._approach_grasp_lift(t)
+            return pos, self.grasp_quat, GRIPPER_OPEN
+
+        elif self._failure_mode == "stop_at_pregrasp":
+            # Approaches above the cube, then stops. Never descends.
+            if t < T_APPROACH:
+                alpha = _phase_alpha(t, 0.0, T_APPROACH)
+                pos = _slerp_pos(self.home_pos, self.pre_grasp_pos, alpha)
+            else:
+                pos = self.pre_grasp_pos
+            return pos, self.grasp_quat, GRIPPER_OPEN
+
+        elif self._failure_mode == "grip_drop_early":
+            # Full approach + grip + brief lift, then opens gripper at _drop_time.
+            # _drop_time is capped at 8.0s so cube never reaches 0.45m.
+            pos, finger = self._approach_grasp_lift(t)
+            if t >= self._drop_time and t >= T_GRIP:
+                finger = GRIPPER_OPEN
+            # After drop, keep EE at current lift position (don't chase success_pos).
+            # Override: hold grasp_pos after drop to emphasise this is a failure.
+            if t >= self._drop_time and t >= T_LIFT:
+                pos = self.grasp_pos   # EE retreats to grasp height
+            return pos, self.grasp_quat, finger
+
+        elif self._failure_mode == "wrong_approach_target":
+            # Goes to wrong position entirely — never contacts cube.
             alpha = _phase_alpha(t, 0.0, T_APPROACH)
             pos = _slerp_pos(self.home_pos, self._wrong_target, alpha)
-        else:
-            # "signal" mode: original behavior
-            alpha = _phase_alpha(t, 0.0, T_APPROACH)
-            pos = _slerp_pos(self.home_pos, self.signal_pos, alpha)
-        return pos, self.neutral_quat, GRIPPER_OPEN
+            return pos, self.neutral_quat, GRIPPER_OPEN
+
+        else:  # "descend_open_grip"
+            # Descends to grasp height with gripper open (cube touched but not gripped),
+            # holds there until T_GRIP, then retreats to home.
+            if t < T_APPROACH:
+                alpha = _phase_alpha(t, 0.0, T_APPROACH)
+                pos = _slerp_pos(self.home_pos, self.pre_grasp_pos, alpha)
+            elif t < T_DWELL:
+                pos = self.pre_grasp_pos
+            elif t < T_GRASP:
+                alpha = _phase_alpha(t, T_DWELL, T_GRASP)
+                pos = _slerp_pos(self.pre_grasp_pos, self.grasp_pos, alpha)
+            elif t < T_GRIP:
+                pos = self.grasp_pos   # hold at grasp height, gripper open
+            else:
+                alpha = _phase_alpha(t, T_GRIP, 10.0)
+                pos = _slerp_pos(self.grasp_pos, self._retreat_pos, alpha)
+            return pos, self.grasp_quat, GRIPPER_OPEN
 
     def _unreachable_success(self, t: float):
-        """Unreachable cube, robot correctly goes to signal position.
-
-        Optional hesitation: first move toward cube for hesitate_end seconds,
-        then redirect to signal_pos.
-        """
+        """Unreachable cube, robot correctly goes to signal position."""
         if self._hesitate_end > 0.0 and t < self._hesitate_end:
-            # Move toward cube direction during hesitation
             alpha = _phase_alpha(t, 0.0, self._hesitate_end)
             pos = _slerp_pos(self.home_pos, self.pre_grasp_pos, alpha)
         else:
-            # Redirect to signal_pos
             t_redirect_start = self._hesitate_end if self._hesitate_end > 0.0 else 0.0
             alpha = _phase_alpha(t, t_redirect_start, t_redirect_start + T_APPROACH)
-            # Start from wherever we were at hesitate_end
             if self._hesitate_end > 0.0:
-                hesitate_alpha = min(1.0, self._hesitate_end / self._hesitate_end)
-                start_pos = _slerp_pos(self.home_pos, self.pre_grasp_pos, hesitate_alpha)
+                start_pos = _slerp_pos(self.home_pos, self.pre_grasp_pos, 1.0)
             else:
                 start_pos = self.home_pos
             pos = _slerp_pos(start_pos, self.signal_pos, alpha)
@@ -264,7 +316,6 @@ class WaypointStateMachine:
     def _unreachable_failure(self, t: float):
         """Unreachable cube, robot wrongly tries to approach it."""
         alpha = _phase_alpha(t, 0.0, T_APPROACH)
-        # Try to go to pre-grasp above the unreachable cube — robot gets stuck
         pos = _slerp_pos(self.home_pos, self.pre_grasp_pos, alpha)
         return pos, self.grasp_quat, GRIPPER_OPEN
 
