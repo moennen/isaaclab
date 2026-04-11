@@ -72,7 +72,7 @@ for exactly the same substeps as the generator. Physics variance: max 0.0002 rad
 
 ## Toolchain
 
-Five tools in `scripts/`, sharing utilities in `_common/` and a task-root module:
+Six tools in `scripts/`, sharing utilities in `_common/` and a task-root module:
 
 ```
 franka_cube_pick/
@@ -80,10 +80,11 @@ franka_cube_pick/
                               # no Isaac Lab imports; used by RL env AND all tools
   scripts/
     generate_sequences.py     # Tool 1 — generates N labeled sequences via Newton IK
-    replay_sequences.py       # Tool 2 — replays sequences via Newton FK, computes rewards
+    replay_sequences.py       # Tool 2 — replays sequences, computes per-frame rewards
     analyze_results.py        # Tool 3 — reads replay JSON, produces reward report + plots
     visualize_sequence.py     # Tool 4 — Newton ViewerGL interactive playback
     analyze_observations.py   # Tool 5 — 7 statistical analyses of observation quality
+    compute_observations.py   # Tool 6 — extracts full 47-dim RL obs via Newton FK+physics
     _common/
       sequence_schema.py      # JSON schema, I/O helpers
       reward_eval.py          # Re-exports from reward_utils.py (no duplicate logic)
@@ -182,17 +183,73 @@ python source/isaaclab_tasks/isaaclab_tasks/manager_based/manipulation/franka_cu
 - `04_expected_vs_actual_correlation.png` — expected vs actual reward scatter
 - `report.txt` — summary table, confusion matrix, reachability mask consistency check
 
+### Tool 6 — compute_observations.py
+
+Extracts the full **47-dim RL observation vector** per frame by replaying sequences
+through the same batched Newton physics model as Tool 2. Required before running
+Tool 5 in Mode A (full obs analysis).
+
+```bash
+python .../scripts/compute_observations.py [--num-worlds 16]
+# Output: data/validation/reference_ik_observations.json
+```
+
+**Mirrors replay_sequences.py exactly** (same model, same params, same substeps).
+Key difference: instead of computing rewards, reads body_q + body_qd + joint_qd from
+Newton state after `eval_fk` to build the full obs vector per frame.
+
+**Obs vector (47 dims):**
+
+| Group | Dims | Source |
+|---|---|---|
+| cube_pos | 3 | `body_q[cube][:3]` − robot_pos |
+| cube_quat | 4 | `body_q[cube][3:7]` (xyzw) |
+| ee_pos | 3 | `body_q[panda_hand][:3]` − robot_pos |
+| ee_quat | 4 | `body_q[panda_hand][3:7]` (xyzw) |
+| ee_linvel | 3 | `body_qd[panda_hand][3:6]` (world frame) |
+| ee_angvel | 3 | `body_qd[panda_hand][0:3]` (world frame) |
+| joint_pos | 9 | `joint_q[0:9]` per world |
+| joint_vel | 9 | `joint_qd[0:9]` per world (physics DOF vel, not finite-diff) |
+| last_action | 9 | `joint_pos_cmd` at current step |
+
+Newton conventions: quaternion = xyzw; body_qd = [omega_xyz(3), linvel_xyz(3)] world frame.
+
+**Output JSON schema:**
+```json
+{
+  "obs_names": [...47 strings...],
+  "obs_dims": 47,
+  "quat_convention": "xyzw",
+  "body_qd_convention": "[omega_xyz(3), linvel_xyz(3)] world frame",
+  "sequences": [
+    { "id": "seq_0000", "label": {...},
+      "frames": [{"step": 0, "t": 0.0, "obs": [47 floats], "reachable_mask": 1.0}] }
+  ]
+}
+```
+
 ### Tool 5 — analyze_observations.py
 
-Pure Python (no Isaac Sim), reads sequences JSON + replay JSON, writes 7 PNG figures + `report.txt`.
+Pure Python (no Isaac Sim), writes 7 PNG figures + `report.txt`.
 
+Two modes:
+
+**Mode A — full 47-dim RL obs** (recommended, requires Tool 6 first):
+```bash
+python .../scripts/analyze_observations.py \
+    --obs    reference_ik_observations.json \
+    --replay reference_ik_replay.json \
+    --output reference_ik_obs_report/
+```
+
+**Mode B — reconstructed 25-dim obs** (no Tool 6 needed, fewer dims):
 ```bash
 python .../scripts/analyze_observations.py
 # defaults: --seqs reference_ik_sequences.json --replay reference_ik_replay.json
 #           --output reference_ik_obs_report/
 ```
 
-**Observation vector analyzed (25 dims):** cube_x/y/z, ee_x/y/z, j0–j6, f0/f1, jv0–jv6, fv0/fv1, grip
+**Observation vector analyzed:** 47 dims (Mode A) or 25 dims (Mode B)
 
 **Outputs (7 analyses):**
 - `01_obs_reward_correlation.png` — Pearson heatmap (25 obs × 8 reward terms)
