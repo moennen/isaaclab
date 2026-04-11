@@ -1,0 +1,173 @@
+Franka Cube Pick — Observation Analysis Report
+================================================================================
+Observation vector : 25 dims (cube_x, cube_y, cube_z, ee_x, ee_y, ee_z, j0, j1, j2, j3, j4, j5, j6, f0, f1, jv0, jv1, jv2, jv3, jv4, jv5, jv6, fv0, fv1, grip)
+Total frames       : 50,000
+
+1. OBS–REWARD CORRELATION (top |r| ≥ 0.20)
+------------------------------------------------------------
+  cube_z       ↔ grip_cube_reachable               r = +0.898
+  grip         ↔ approach_cube_reachable           r = +0.840
+  f0           ↔ approach_cube_reachable           r = -0.831
+  f1           ↔ approach_cube_reachable           r = -0.830
+  cube_z       ↔ lift_cube_reachable               r = +0.815
+  ee_z         ↔ go_to_signal_position             r = +0.795
+  ee_z         ↔ signal_reached_unreachable        r = +0.782
+  j4           ↔ go_to_signal_position             r = -0.753
+  j4           ↔ signal_reached_unreachable        r = -0.739
+  grip         ↔ grip_cube_reachable               r = +0.582
+  f0           ↔ grip_cube_reachable               r = -0.576
+  f1           ↔ grip_cube_reachable               r = -0.573
+  j0           ↔ go_to_signal_position             r = -0.549
+  j0           ↔ signal_reached_unreachable        r = -0.542
+  jv6          ↔ joint_vel                         r = +0.528
+  j1           ↔ go_to_signal_position             r = -0.496
+  j1           ↔ signal_reached_unreachable        r = -0.486
+  jv1          ↔ joint_vel                         r = -0.474
+  j6           ↔ go_to_signal_position             r = +0.470
+  j6           ↔ signal_reached_unreachable        r = +0.464
+  cube_z       ↔ approach_cube_reachable           r = +0.456
+  j5           ↔ approach_cube_reachable           r = +0.449
+  jv5          ↔ joint_vel                         r = -0.421
+  ee_x         ↔ go_to_signal_position             r = -0.410
+  ee_x         ↔ signal_reached_unreachable        r = -0.403
+
+2. OBS–ACTION CORRELATION (top |r| ≥ 0.40)
+------------------------------------------------------------
+  j6           ↔ cmd_j6          r = +0.997
+  j2           ↔ cmd_j2          r = +0.996
+  j0           ↔ cmd_j0          r = +0.995
+  j3           ↔ cmd_j3          r = +0.994
+  j4           ↔ cmd_j4          r = +0.991
+  j1           ↔ cmd_j1          r = +0.990
+  j5           ↔ cmd_j5          r = +0.982
+  grip         ↔ cmd_f1          r = -0.949
+  grip         ↔ cmd_f0          r = -0.949
+  f0           ↔ cmd_f1          r = +0.930
+  f0           ↔ cmd_f0          r = +0.930
+  f1           ↔ cmd_f1          r = +0.927
+  f1           ↔ cmd_f0          r = +0.927
+  ee_z         ↔ cmd_j4          r = -0.683
+  j0           ↔ cmd_j4          r = +0.602
+  j4           ↔ cmd_j0          r = +0.601
+  ee_x         ↔ cmd_j3          r = +0.583
+  ee_z         ↔ cmd_j1          r = -0.580
+  j1           ↔ cmd_j4          r = +0.579
+  j4           ↔ cmd_j1          r = +0.574
+  cube_z       ↔ cmd_f1          r = -0.552
+  cube_z       ↔ cmd_f0          r = -0.552
+  j3           ↔ cmd_j1          r = +0.543
+  cube_y       ↔ cmd_j6          r = +0.540
+  j1           ↔ cmd_j3          r = +0.538
+
+3. MARKOV PROPERTY TEST (ΔR² > 0.05 = history helps)
+------------------------------------------------------------
+  fv1           ΔR²=0.077  R²(t)=0.325 → R²(t,t-1)=0.402
+  fv0           ΔR²=0.075  R²(t)=0.322 → R²(t,t-1)=0.397
+
+4. PCA REDUNDANCY
+------------------------------------------------------------
+  90% variance → 13 PCs  (of 25 dims, 52% of full dim)
+  95% variance → 16 PCs
+  99% variance → 21 PCs
+
+5. LABEL DISCRIMINABILITY (top Fisher ratio per split)
+------------------------------------------------------------
+  Reachable vs Unreachable (top 8):
+    ee_z          F=0.57
+    j4            F=0.56
+    cube_x        F=0.52
+    grip          F=0.45
+    f0            F=0.41
+    f1            F=0.41
+    j0            F=0.34
+    j1            F=0.19
+  Success vs Failure (top 8):
+    ee_z          F=0.31
+    f0            F=0.28
+    f1            F=0.27
+    grip          F=0.27
+    j5            F=0.17
+    cube_z        F=0.16
+    j4            F=0.16
+    cube_y        F=0.15
+
+6. REWARD PREDICTABILITY (R² of obs → per-frame reward)
+------------------------------------------------------------
+  reachable_success           : R² = 0.868
+  reachable_failure           : R² = 0.587
+  unreachable_success         : R² = 0.940
+  unreachable_failure         : R² = 0.900
+  ALL                         : R² = 0.873
+
+7. TEMPORAL AUTOCORRELATION (lag-1, avg over seqs)
+------------------------------------------------------------
+  Fast-changing dims (lag-1 < 0.5 — high noise, little smoothness):
+    (none)
+  Slow-changing dims (lag-1 ≥ 0.95 — near-constant per step):
+    j6            ac₁=1.000
+    j2            ac₁=0.999
+    j4            ac₁=0.999
+    j0            ac₁=0.999
+    j3            ac₁=0.999
+    j1            ac₁=0.999
+    ee_z          ac₁=0.999
+    ee_x          ac₁=0.999
+    j5            ac₁=0.999
+    ee_y          ac₁=0.998
+    grip          ac₁=0.996
+    cube_z        ac₁=0.996
+    jv4           ac₁=0.992
+    jv6           ac₁=0.991
+    jv2           ac₁=0.987
+    jv1           ac₁=0.985
+    jv0           ac₁=0.985
+    jv5           ac₁=0.985
+    jv3           ac₁=0.976
+    f0            ac₁=0.967
+    f1            ac₁=0.961
+
+================================================================================
+RECOMMENDATIONS FOR OBSERVATION DESIGN
+================================================================================
+
+A. POTENTIALLY MISSING OBSERVATIONS
+------------------------------------------------------------
+  • cube_vel_xyz (3 dims): cube velocity would improve Markov completeness
+    for post-contact dynamics. cube_z is tracked but not its velocity;
+    cube_vel_z would help the policy detect whether the cube is falling.
+
+  • dist_cube_xy (1 dim): horizontal distance from robot base.
+    Derivable from (cube_x, cube_y) but making it explicit reduces policy
+    burden for reachability classification.
+
+  • ee_to_cube_xyz (3 dims): vector from EE to cube = cube_pos - ee_pos.
+    This is the most direct input for approach_cube reward; high r expected.
+    Currently the policy must infer it from separate cube_pos and ee_pos.
+
+  • gripper_width (1 dim): continuous sum of finger joint positions
+    (= f0 + f1, range 0..0.08). Currently only binary grip is in obs.
+    Continuous width gives fine-grained grasp feedback unavailable from binary.
+
+B. POSSIBLY REDUNDANT OBSERVATIONS
+------------------------------------------------------------
+  • If PCA 90% threshold uses ≤ 15 PCs (≤60% of dims), the joint space
+    has significant correlations that could be reduced.
+  • Slow-changing dims (lag-1 ≥ 0.98) add negligible new info per step;
+    frame-stacking 2 steps captures dynamics without increasing obs size.
+
+C. REWARD–OBSERVATION ALIGNMENT
+------------------------------------------------------------
+  • Dims with low Fisher ratio for BOTH splits (reachable/success) carry
+    little discriminating information and may be prunable.
+  • Low R² in reward predictability (within a label group) suggests the
+    current obs cannot linearly predict the reward — either the reward is
+    delayed (sparse) or depends on missing derived features.
+
+D. MARKOV COMPLETENESS
+------------------------------------------------------------
+  • Dims with ΔR² > 0.05 indicate that knowing obs[t-1] helps predict
+    obs[t+1] beyond what obs[t] alone provides. The most common cause is
+    missing velocity terms (position dims look non-Markovian when velocity
+    is absent). If arm velocities do NOT appear in the non-Markov list,
+    including joint_vel is sufficient for Markov completeness at this scale.
+

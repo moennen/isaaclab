@@ -255,3 +255,23 @@ The project's validation phase is complete when:
   All reward logic updated in reward_utils.py (source of truth), mdp/rewards.py, mdp/__init__.py,
   reward_eval.py. Validated: 100/100 [OK], 48 TP, 52 TN, 0 FN, 0 FP. Physics variance ≈ 0.
   Updated analyze_results.py TERM_NAMES/REWARD_WEIGHTS (now 8 terms). Updated env cfg RewardsCfg.
+- 2026-04-11: Added Tool 5 — Observation Analyzer (analyze_observations.py). Runs 7 analyses on
+  reference_ik_sequences.json + reference_ik_replay.json; outputs 7 PNGs + report.txt to
+  reference_ik_obs_report/. No Isaac Sim required (pure numpy/sklearn/matplotlib).
+  Key findings from the reference dataset (100 seqs, 50,000 frames):
+  (1) Obs–Reward: cube_z is top predictor of grip/lift rewards (r≈0.9/0.8). grip binary and finger
+    positions strongly predict approach_cube reward (r≈0.83). ee_z and j4 predict signal rewards (r≈0.78).
+  (2) Obs–Action: joint positions near-perfectly correlated with commands (r>0.99) — scripted IK
+    sequences; finger commands anti-correlated with grip binary (r≈−0.95).
+  (3) Markov: only fv0/fv1 (finger velocities) show ΔR²>0.05 (ΔR²≈0.076) — near-Markovian overall.
+    Arm joints and cube position are fully Markovian at 50Hz. Finger velocity transitions at
+    open/close events account for the small non-Markovian signal.
+  (4) PCA: 90% variance in 13 of 25 dims (52% effective dimensionality). Redundancy from joint–command
+    correlation (r>0.99) and slow state evolution.
+  (5) Discriminability: ee_z (F=0.57) and j4 (F=0.56) best discriminate reachable/unreachable;
+    cube_x (F=0.52) provides direct reachability signal. Success vs failure: ee_z (F=0.31) and
+    finger positions (F≈0.28) are top discriminators.
+  (6) Reward predictability: R²=0.87–0.94 within each label group — current obs linearly predicts
+    ~90% of per-frame reward variance. Suggests no critical missing features for reward correlation.
+  (7) Autocorrelation: all 25 dims have lag-1 ac≥0.96 — smooth control at 50Hz, no noisy dims.
+  Candidate missing observations: ee_to_cube_xyz (3), gripper_width continuous (1), dist_cube_xy (1).

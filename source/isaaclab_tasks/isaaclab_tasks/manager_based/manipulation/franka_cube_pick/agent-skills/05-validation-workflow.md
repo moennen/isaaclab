@@ -72,22 +72,23 @@ for exactly the same substeps as the generator. Physics variance: max 0.0002 rad
 
 ## Toolchain
 
-Four tools in `scripts/`, sharing utilities in `_common/` and a task-root module:
+Five tools in `scripts/`, sharing utilities in `_common/` and a task-root module:
 
 ```
 franka_cube_pick/
-  reward_utils.py           # SINGLE SOURCE OF TRUTH — pure-tensor reward kernels
-                            # no Isaac Lab imports; used by RL env AND all tools
+  reward_utils.py             # SINGLE SOURCE OF TRUTH — pure-tensor reward kernels
+                              # no Isaac Lab imports; used by RL env AND all tools
   scripts/
-    generate_sequences.py   # Tool 1 — generates N labeled sequences via Newton IK
-    replay_sequences.py     # Tool 2 — replays sequences via Newton FK, computes rewards
-    analyze_results.py      # Tool 3 — reads replay JSON, produces report + plots
-    visualize_sequence.py   # Tool 4 — Newton ViewerGL interactive playback
+    generate_sequences.py     # Tool 1 — generates N labeled sequences via Newton IK
+    replay_sequences.py       # Tool 2 — replays sequences via Newton FK, computes rewards
+    analyze_results.py        # Tool 3 — reads replay JSON, produces reward report + plots
+    visualize_sequence.py     # Tool 4 — Newton ViewerGL interactive playback
+    analyze_observations.py   # Tool 5 — 7 statistical analyses of observation quality
     _common/
-      sequence_schema.py    # JSON schema, I/O helpers
-      reward_eval.py        # Re-exports from reward_utils.py (no duplicate logic)
-      waypoint_ik.py        # IK waypoint state machine for all 4 scenario types
-      sampling.py           # cube position + label sampling
+      sequence_schema.py      # JSON schema, I/O helpers
+      reward_eval.py          # Re-exports from reward_utils.py (no duplicate logic)
+      waypoint_ik.py          # IK waypoint state machine for all 4 scenario types
+      sampling.py             # cube position + label sampling
 ```
 
 **Key architecture invariant:** `reward_utils.py` is the only place reward math is defined.
@@ -180,6 +181,42 @@ python source/isaaclab_tasks/isaaclab_tasks/manager_based/manipulation/franka_cu
 - `03_per_frame_reward_curves.png` — mean per-term reward curves over time per label
 - `04_expected_vs_actual_correlation.png` — expected vs actual reward scatter
 - `report.txt` — summary table, confusion matrix, reachability mask consistency check
+
+### Tool 5 — analyze_observations.py
+
+Pure Python (no Isaac Sim), reads sequences JSON + replay JSON, writes 7 PNG figures + `report.txt`.
+
+```bash
+python .../scripts/analyze_observations.py
+# defaults: --seqs reference_ik_sequences.json --replay reference_ik_replay.json
+#           --output reference_ik_obs_report/
+```
+
+**Observation vector analyzed (25 dims):** cube_x/y/z, ee_x/y/z, j0–j6, f0/f1, jv0–jv6, fv0/fv1, grip
+
+**Outputs (7 analyses):**
+- `01_obs_reward_correlation.png` — Pearson heatmap (25 obs × 8 reward terms)
+- `02_obs_action_correlation.png` — Pearson heatmap (25 obs × 9 actions)
+- `03_markov_test.png` — ΔR² per dim: does obs[t-1] help predict obs[t+1] beyond obs[t]?
+- `04_pca_redundancy.png` — cumulative explained variance + per-component breakdown
+- `05_label_discriminability.png` — Fisher ratio per dim, reachable/unreachable + success/failure splits
+- `06_reward_predictability.png` — R² of linear regression obs → per-frame reward per label group
+- `07_temporal_autocorrelation.png` — lag-1 through lag-10 autocorrelation heatmap
+- `report.txt` — ranked correlation lists, Markov diagnosis, PCA summary, discriminability ranking, recommendations
+
+**Key findings (reference_ik dataset, 2026-04-11):**
+- `cube_z` predicts `grip_cube_reachable` (r=+0.90) and `lift_cube_reachable` (r=+0.82) — reward is height-gated
+- `grip` + `f0/f1` predict `approach_cube_reachable` (r≈±0.83) — gripper state encodes task phase
+- `ee_z` + `j4` predict signal rewards (r≈0.78) — arm posture encodes signal branch
+- **Near-Markovian**: only `fv0/fv1` show ΔR²>0.05 (ΔR²≈0.076) — finger velocity at open/close transitions
+- **52% effective dim**: 90% PCA variance in 13 of 25 dims — joint–command correlation dominates
+- **Reward predictable**: R²=0.87–0.94 within each label group — obs linearly encodes per-frame reward
+- **All dims slow**: lag-1 autocorr ≥ 0.96 — 50Hz control is smooth; no noisy dimensions
+
+**Candidate obs enhancements (from report):**
+- `ee_to_cube_xyz` (3): explicit approach vector (currently policy infers from separate cube + ee pos)
+- `gripper_width` (1): continuous finger sum — more informative than binary grip flag
+- `dist_cube_xy` (1): explicit reachability signal from horizontal distance
 
 ### Reward function (standalone, in `_common/reward_eval.py`)
 
@@ -373,6 +410,11 @@ Six output files written to `--output` dir:
   instead of 250 at 25Hz) eliminates timing approximation — physics variance now max 0.0004 rad.
   Default data paths renamed to reference_ik_sequences.json / reference_ik_replay.json / reference_ik_report/.
   Updated run stats: reachable_success=1318, unreachable_success=3744, failures≈44/0.06.
+- 2026-04-11: added Tool 5 — Observation Analyzer (analyze_observations.py). 7 analyses on
+  sequences + replay JSON; 7 PNGs + report.txt → reference_ik_obs_report/. Pure numpy/sklearn/matplotlib.
+  Key findings (100 seqs, 50,000 frames): cube_z is top predictor of grip/lift rewards (r≈0.9/0.8);
+  observation is near-Markovian (only fv0/fv1 show ΔR²>0.05); 90% PCA variance in 13 of 25 dims (52%);
+  ee_z/j4 discriminate reachable/unreachable best (F≈0.57); R²=0.87–0.94 within each label group.
 - 2026-04-10: fixed two critical bugs in generate_sequences.py + replay_sequences.py:
   (1) generator recorded `joint_q_ik_np[w]` (IK output, finger always 0.04 open) as `joint_pos_cmd`
   instead of `ctrl_np[w, :9]` (actual control with finger override to 0.0 at grasp, 0.04 at drop).
