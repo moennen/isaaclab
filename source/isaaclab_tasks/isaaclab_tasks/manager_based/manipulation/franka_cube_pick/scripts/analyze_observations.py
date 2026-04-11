@@ -1,35 +1,39 @@
 """Tool 5 — Observation Analyzer.
 
-Reads sequences.json (Tool 1 output) and replay.json (Tool 2 output) and produces
-7 analyses to diagnose observation quality and guide observation design:
+Two input modes:
 
+  Mode A — Full 47-dim RL obs (recommended):
+    --obs    reference_ik_observations.json  (Tool 6 output)
+    --replay reference_ik_replay.json        (Tool 2 output, for reward data)
+
+  Mode B — Reconstructed 25-dim obs (fallback, no Tool 6 needed):
+    --seqs   reference_ik_sequences.json     (Tool 1 output)
+    --replay reference_ik_replay.json        (Tool 2 output)
+
+Produces 7 analyses:
   1. Obs–Reward Pearson correlation heatmap
   2. Obs–Action Pearson correlation heatmap
   3. Markov property test — ΔR² per obs dim when adding obs[t-1]
   4. PCA redundancy — cumulative explained variance
-  5. Label discriminability — Fisher ratio per obs dim (reachable vs unreachable, success vs failure)
+  5. Label discriminability — Fisher ratio (reachable vs unreachable, success vs failure)
   6. Reward predictability — R² of linear obs → per-frame reward per label group
   7. Temporal autocorrelation — lag 1–10 per obs dim
 
-All figures saved as PNG. No Isaac Sim required — pure Python/numpy/sklearn/matplotlib.
-
-Observation vector (25 dims)
------------------------------
-  cube_x/y/z    (3): cube world-frame position expressed in robot root frame
-  ee_x/y/z      (3): EE world-frame position expressed in robot root frame
-  j0..j6        (7): arm joint positions [rad]
-  f0, f1        (2): finger joint positions [m]
-  jv0..jv6      (7): arm joint velocities [rad/s]
-  fv0, fv1      (2): finger joint velocities [m/s]
-  grip          (1): gripper_closed binary
+No Isaac Sim required — pure Python/numpy/sklearn/matplotlib.
 
 Usage
 -----
+# Full 47-dim analysis (after running compute_observations.py):
+python scripts/analyze_observations.py \\
+    --obs    data/validation/reference_ik_observations.json \\
+    --replay data/validation/reference_ik_replay.json \\
+    --output data/validation/reference_ik_obs_report/
+
+# Fallback 25-dim analysis (sequences + replay only):
 python scripts/analyze_observations.py \\
     --seqs   data/validation/reference_ik_sequences.json \\
     --replay data/validation/reference_ik_replay.json \\
-    --output data/validation/reference_ik_obs_report/ \\
-    [--show]
+    --output data/validation/reference_ik_obs_report/
 """
 
 import argparse
@@ -55,14 +59,19 @@ _OUTPUTS_DIR = _TASK_ROOT / "data" / "validation"
 
 parser = argparse.ArgumentParser(description="Analyze Franka cube pick observations.")
 parser.add_argument(
+    "--obs", type=str, default=None,
+    help="[Mode A] Path to reference_ik_observations.json (Tool 6 output). "
+         "When provided, uses full 47-dim RL obs vector.",
+)
+parser.add_argument(
     "--seqs", type=str,
     default=str(_OUTPUTS_DIR / "reference_ik_sequences.json"),
-    help="Path to sequences JSON (Tool 1 output).",
+    help="[Mode B] Path to sequences JSON (Tool 1 output). Used when --obs is absent.",
 )
 parser.add_argument(
     "--replay", type=str,
     default=str(_OUTPUTS_DIR / "reference_ik_replay.json"),
-    help="Path to replay JSON (Tool 2 output).",
+    help="Path to replay JSON (Tool 2 output). Required for reward data in both modes.",
 )
 parser.add_argument(
     "--output", type=str,
@@ -72,26 +81,22 @@ parser.add_argument(
 parser.add_argument("--show", action="store_true", help="Show plots interactively.")
 args = parser.parse_args()
 
-# ---- Observation / action layout -------------------------------------------
+# ---- Fallback observation layout (Mode B, 25 dims) -------------------------
 
-OBS_NAMES = [
-    # Cube position in robot frame (robot base at world origin → same as world frame)
+_OBS_NAMES_25 = [
     "cube_x", "cube_y", "cube_z",
-    # EE position in robot frame
     "ee_x", "ee_y", "ee_z",
-    # Arm joint positions (7)
     "j0", "j1", "j2", "j3", "j4", "j5", "j6",
-    # Finger joint positions (2)
     "f0", "f1",
-    # Arm joint velocities (7)
     "jv0", "jv1", "jv2", "jv3", "jv4", "jv5", "jv6",
-    # Finger joint velocities (2)
     "fv0", "fv1",
-    # Gripper closed binary
     "grip",
 ]  # 25 total
 
 ACTION_NAMES = [f"cmd_j{i}" for i in range(7)] + ["cmd_f0", "cmd_f1"]  # 9 total
+
+# Populated by main() from either the --obs file (47 dims) or _OBS_NAMES_25 (25 dims)
+OBS_NAMES: list = []
 
 REWARD_TERMS = [
     "approach_cube_reachable",
@@ -142,81 +147,140 @@ def save_fig(fig, name: str, out_dir: Path, show: bool = False):
 
 # ---- Data loading ----------------------------------------------------------
 
-def load_data(seqs_path: str, replay_path: str):
-    """Load sequences and replay; build aligned numpy arrays.
+def _load_rewards_from_replay(replay_path: str, seq_ids_by_seqname: dict):
+    """Load per-frame weighted rewards aligned to the sequences in seq_ids_by_seqname.
 
-    Returns
-    -------
-    obs         : (N, 25) float32 — observation vector per frame
-    actions     : (N, 9)  float32 — joint_pos_cmd per frame
-    rewards     : dict[term] → (N,) float32 — weighted per-frame reward per term
-    total       : (N,)  float32 — per-frame total reward
-    mask        : (N,)  bool    — True = reachable branch
-    labels      : (N,)  str     — label string per frame
-    seqids      : (N,)  int     — sequence index (for temporal analysis)
+    Returns parallel lists (same frame order as the caller's seq iteration):
+        rew_dict  : dict[term] → list of floats
+        tot_list  : list of floats
+        mask_list : list of bools
     """
-    with open(seqs_path) as f:
-        seqs_data = json.load(f)
     with open(replay_path) as f:
         replay_data = json.load(f)
-
-    seqs  = seqs_data["sequences"]
     rseqs = {r["id"]: r for r in replay_data["sequences"]}
 
-    obs_list  = []
-    act_list  = []
     rew_dict  = {t: [] for t in REWARD_TERMS}
     tot_list  = []
     mask_list = []
-    lbl_list  = []
-    sid_list  = []
 
-    for seq_idx, seq in enumerate(seqs):
-        rseq    = rseqs[seq["id"]]
-        lbl     = label_str(seq["label"])
-        frames  = seq["frames"]
+    for seq_name, n_frames in seq_ids_by_seqname.items():
+        rseq    = rseqs[seq_name]
         rframes = rseq["frames"]
-        assert len(frames) == len(rframes), f"Frame mismatch in {seq['id']}"
-
-        for f, rf in zip(frames, rframes):
-            jp = f["joint_pos"]      # list[9]
-            jv = f["joint_vel"]      # list[9]
-            jc = f["joint_pos_cmd"]  # list[9]
-            ep = f["ee_pos_w"]       # list[3]
-            rp = f["robot_pos_w"]    # list[3]  (≈ [0,0,0] — robot fixed at origin)
-            cp = f["cube_pos_w"]     # list[3]
-
-            # Robot-frame positions (subtract robot base)
-            cube_b = [cp[0] - rp[0], cp[1] - rp[1], cp[2] - rp[2]]
-            ee_b   = [ep[0] - rp[0], ep[1] - rp[1], ep[2] - rp[2]]
-
-            grip = 1.0 if f["gripper_closed"] else 0.0
-
-            obs_vec = cube_b + ee_b + jp[:7] + jp[7:9] + jv[:7] + jv[7:9] + [grip]
-            obs_list.append(obs_vec)
-            act_list.append(jc)
-
+        assert len(rframes) == n_frames, f"Frame count mismatch for {seq_name}"
+        for rf in rframes:
             frame_total = 0.0
             for term in REWARD_TERMS:
-                raw = rf["rewards"].get(term, 0.0)
+                raw      = rf["rewards"].get(term, 0.0)
                 weighted = raw * REWARD_WEIGHTS[term]
                 rew_dict[term].append(weighted)
                 frame_total += weighted
             tot_list.append(frame_total)
             mask_list.append(rf["reachable_mask"] > 0.5)
+
+    return rew_dict, tot_list, mask_list
+
+
+def load_data_from_obs(obs_path: str, replay_path: str):
+    """Mode A — full 47-dim obs from compute_observations.py output.
+
+    Returns
+    -------
+    obs         : (N, 47) float32
+    obs_names   : list[str]  — 47 dim names
+    actions     : (N, 9)  float32  — last 9 dims of obs (last_action)
+    rewards     : dict[term] → (N,) float32
+    total       : (N,)  float32
+    mask        : (N,)  bool
+    labels      : (N,)  str
+    seqids      : (N,)  int
+    """
+    with open(obs_path) as f:
+        obs_data = json.load(f)
+
+    obs_names = obs_data["obs_names"]      # 47 strings
+    seqs      = obs_data["sequences"]
+
+    obs_list  = []
+    lbl_list  = []
+    sid_list  = []
+    seq_ids_by_seqname = {}   # {seq_id: n_frames}
+
+    for seq_idx, seq in enumerate(seqs):
+        lbl = label_str(seq["label"])
+        frames = seq["frames"]
+        seq_ids_by_seqname[seq["id"]] = len(frames)
+        for f in frames:
+            obs_list.append(f["obs"])
+            lbl_list.append(lbl)
+            sid_list.append(seq_idx)
+
+    obs    = np.array(obs_list, dtype=np.float32)
+    labels = np.array(lbl_list)
+    seqids = np.array(sid_list, dtype=np.int32)
+
+    # Last 9 dims of obs are last_action
+    action_start = len(obs_names) - len(ACTION_NAMES)
+    actions = obs[:, action_start:]
+
+    rew_dict, tot_list, mask_list = _load_rewards_from_replay(replay_path, seq_ids_by_seqname)
+
+    rewards = {t: np.array(v, dtype=np.float32) for t, v in rew_dict.items()}
+    total   = np.array(tot_list,  dtype=np.float32)
+    mask    = np.array(mask_list, dtype=bool)
+
+    n_seqs, n_frames = len(seqs), len(seqs[0]["frames"])
+    print(f"[obs] Mode A (47-dim): {len(obs):,} frames ({n_seqs} seqs × {n_frames} frames/seq)")
+    return obs, obs_names, actions, rewards, total, mask, labels, seqids
+
+
+def load_data_from_seqs(seqs_path: str, replay_path: str):
+    """Mode B — reconstructed 25-dim obs from sequences + replay JSON.
+
+    Returns same tuple as load_data_from_obs but obs is (N, 25) and
+    obs_names = _OBS_NAMES_25.
+    """
+    with open(seqs_path) as f:
+        seqs_data = json.load(f)
+    seqs = seqs_data["sequences"]
+
+    obs_list  = []
+    act_list  = []
+    lbl_list  = []
+    sid_list  = []
+    seq_ids_by_seqname = {}
+
+    for seq_idx, seq in enumerate(seqs):
+        lbl    = label_str(seq["label"])
+        frames = seq["frames"]
+        seq_ids_by_seqname[seq["id"]] = len(frames)
+        for f in frames:
+            jp = f["joint_pos"]
+            jv = f["joint_vel"]
+            jc = f["joint_pos_cmd"]
+            ep = f["ee_pos_w"]
+            rp = f["robot_pos_w"]
+            cp = f["cube_pos_w"]
+            cube_b = [cp[0]-rp[0], cp[1]-rp[1], cp[2]-rp[2]]
+            ee_b   = [ep[0]-rp[0], ep[1]-rp[1], ep[2]-rp[2]]
+            grip   = 1.0 if f["gripper_closed"] else 0.0
+            obs_list.append(cube_b + ee_b + jp[:7] + jp[7:9] + jv[:7] + jv[7:9] + [grip])
+            act_list.append(jc)
             lbl_list.append(lbl)
             sid_list.append(seq_idx)
 
     obs     = np.array(obs_list, dtype=np.float32)
     actions = np.array(act_list, dtype=np.float32)
-    rewards = {t: np.array(v, dtype=np.float32) for t, v in rew_dict.items()}
-    total   = np.array(tot_list, dtype=np.float32)
-    mask    = np.array(mask_list, dtype=bool)
     labels  = np.array(lbl_list)
     seqids  = np.array(sid_list, dtype=np.int32)
 
-    print(f"[obs] Loaded {len(obs):,} frames ({len(seqs)} seqs × {len(frames)} frames/seq)")
-    return obs, actions, rewards, total, mask, labels, seqids
+    rew_dict, tot_list, mask_list = _load_rewards_from_replay(replay_path, seq_ids_by_seqname)
+    rewards = {t: np.array(v, dtype=np.float32) for t, v in rew_dict.items()}
+    total   = np.array(tot_list,  dtype=np.float32)
+    mask    = np.array(mask_list, dtype=bool)
+
+    n_seqs, n_frames = len(seqs), len(seqs[0]["frames"])
+    print(f"[obs] Mode B (25-dim): {len(obs):,} frames ({n_seqs} seqs × {n_frames} frames/seq)")
+    return obs, _OBS_NAMES_25, actions, rewards, total, mask, labels, seqids
 
 
 # ---- Analysis 1: Obs–Reward Pearson correlation ----------------------------
@@ -716,7 +780,19 @@ def main():
     out_dir = Path(args.output)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    obs, actions, rewards, total, mask, labels, seqids = load_data(args.seqs, args.replay)
+    if args.obs is not None:
+        obs, obs_names, actions, rewards, total, mask, labels, seqids = \
+            load_data_from_obs(args.obs, args.replay)
+        print(f"[obs] Mode A — {len(obs_names)}-dim obs from {args.obs}")
+    else:
+        obs, obs_names, actions, rewards, total, mask, labels, seqids = \
+            load_data_from_seqs(args.seqs, args.replay)
+        print(f"[obs] Mode B — {len(obs_names)}-dim obs reconstructed from sequences")
+
+    # Patch the global OBS_NAMES used by all analysis functions
+    global OBS_NAMES
+    OBS_NAMES = obs_names
+
     n = len(obs)
 
     print("\n[obs] Running 7 analyses...")
