@@ -28,12 +28,14 @@ _mod  = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_mod)
 
 # Re-export everything that callers need
-REWARD_WEIGHTS       = _mod.REWARD_WEIGHTS         # noqa: F401
-compute_action_rate  = _mod.compute_action_rate    # noqa: F401
-compute_all_rewards  = _mod.compute_all_rewards    # noqa: F401
-compute_approach_cube = _mod.compute_approach_cube # noqa: F401
-compute_cube_at_success = _mod.compute_cube_at_success  # noqa: F401
-compute_go_to_signal = _mod.compute_go_to_signal   # noqa: F401
-compute_joint_vel    = _mod.compute_joint_vel       # noqa: F401
-compute_lift_cube    = _mod.compute_lift_cube       # noqa: F401
-reachable_mask       = _mod.reachable_mask          # noqa: F401
+REWARD_WEIGHTS              = _mod.REWARD_WEIGHTS              # noqa: F401
+compute_action_rate         = _mod.compute_action_rate         # noqa: F401
+compute_all_rewards         = _mod.compute_all_rewards         # noqa: F401
+compute_approach_cube       = _mod.compute_approach_cube       # noqa: F401
+compute_cube_at_success     = _mod.compute_cube_at_success     # noqa: F401
+compute_go_to_signal        = _mod.compute_go_to_signal        # noqa: F401
+compute_grip_cube           = _mod.compute_grip_cube           # noqa: F401
+compute_joint_vel           = _mod.compute_joint_vel           # noqa: F401
+compute_lift_cube           = _mod.compute_lift_cube           # noqa: F401
+compute_signal_reached      = _mod.compute_signal_reached      # noqa: F401
+reachable_mask              = _mod.reachable_mask              # noqa: F401

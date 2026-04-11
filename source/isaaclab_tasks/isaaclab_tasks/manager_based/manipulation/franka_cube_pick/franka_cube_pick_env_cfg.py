@@ -185,21 +185,20 @@ class EventCfg:
 
 @configclass
 class RewardsCfg:
-    """Two-branch reward: pick path when reachable, signal path when not.
+    """Two symmetric branches: pick when reachable, signal when not.
 
-    PROPOSED reward structure (validate with scripted sequences before RL):
+    Reachable branch (cube XY dist from base in [R_MIN, R_MAX]):
+      approach_cube   (1.0)  dense — EE closes on cube
+      grip_cube       (5.0)  binary — gripper closed + cube > 5 cm
+      lift_cube      (10.0)  binary — cube > 0.5 m
+      cube_at_success(15.0)  dense — EE at success pos while lifted
 
-    Reachable branch (active when cube horizontal dist from base is in [R_MIN, R_MAX]):
-      - approach_cube:      1 - tanh(||ee - cube|| / 0.1)       weight=1.0
-      - lift_cube:          indicator(cube_z > 0.5)               weight=10.0  (mid-Franka height)
-      - cube_at_success:    lift * (1 - tanh(||cube - success|| / 0.1))  weight=15.0
-
-    Unreachable branch (active when cube is outside reachable zone):
-      - go_to_signal:       1 - tanh(||ee - signal|| / 0.1)     weight=10.0
+    Unreachable branch (cube outside reachable zone):
+      go_to_signal    (1.0)  dense shaping toward signal (gradient only)
+      signal_reached (10.0)  binary — EE within 5 cm of signal pos
 
     Penalties (always active):
-      - action_rate:        -||delta_action||²                   weight=-1e-4
-      - joint_vel:          -||joint_vel||²                      weight=-1e-4
+      action_rate (-1e-4), joint_vel (-1e-4)
     """
 
     # --- Reachable branch ---
@@ -210,6 +209,11 @@ class RewardsCfg:
             "ee_cfg": SceneEntityCfg("robot", body_names=["panda_hand"]),
         },
         weight=1.0,
+    )
+    grip_cube = RewTerm(
+        func=mdp.grip_cube_reachable,
+        params={"grip_height": 0.05, "closed_threshold": 0.06},
+        weight=5.0,
     )
     lift_cube = RewTerm(
         func=mdp.lift_cube_reachable,
@@ -231,6 +235,14 @@ class RewardsCfg:
         func=mdp.go_to_signal_position,
         params={
             "std": 0.1,
+            "ee_cfg": SceneEntityCfg("robot", body_names=["panda_hand"]),
+        },
+        weight=1.0,
+    )
+    signal_reached = RewTerm(
+        func=mdp.signal_reached_unreachable,
+        params={
+            "signal_threshold": 0.05,
             "ee_cfg": SceneEntityCfg("robot", body_names=["panda_hand"]),
         },
         weight=10.0,

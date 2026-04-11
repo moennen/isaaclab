@@ -156,7 +156,8 @@ The specific task is a Franka Panda robot that must pick up a rigid cube if it i
 ## Open Questions
 
 - **Position validation**: The geometry constants (reachable_radius_min/max, success_ee_position, signal_ee_position, cube_spawn_x/y) were proposed by the agent and have not yet been explicitly confirmed by the user. Marked `PENDING VALIDATION` in `04-task-domain.md`.
-- **Reward weights**: REWARD_WEIGHTS in reward_eval.py (approach=1.0, lift=10.0, success=15.0, signal=10.0, action_rate=-1e-4, joint_vel=-1e-4) validated by toolchain run (HIGH/LOW gap is orders of magnitude); final tuning may happen during RL training.
+- **Reward weights**: REWARD_WEIGHTS validated by toolchain run (HIGH/LOW gap is clear); final tuning may happen during RL training. Current structure: reachable branch (approach=1.0, grip=5.0, lift=10.0, success=15.0) + unreachable branch (go_to_signal=1.0 shaping, signal_reached=10.0 binary). Remaining branch imbalance (~2.8× unreachable vs reachable) requires early episode termination to fully resolve; acceptable for initial RL training.
+- **Finger joint indices**: `grip_cube_reachable` uses hardcoded joint indices [7, 8] for `panda_finger_joint1/2`. Validated by observation that reachable_success reward increased from ~672 to ~1318 when `closed_threshold=0.06` (contact resistance from cube keeps q₁+q₂≈0.04 when grasping). If robot URDF changes, these indices must be updated.
 
 ---
 
@@ -171,6 +172,8 @@ The project's validation phase is complete when:
 5. Signal reward is zero throughout all reachable episodes; approach/lift/success rewards are zero throughout all unreachable episodes (branch exclusivity) (**✓ 2026-04-10** — 0/25,000 reachability mask mismatches).
 
 **Validation phase complete as of 2026-04-10 (re-validated with batched Newton physics, 100/100 correct).**
+
+**Reward improvements validated 2026-04-11 — see Changelog. New structure: 6 terms (was 4), 100/100 correct.**
 
 ---
 
@@ -233,3 +236,22 @@ The project's validation phase is complete when:
   `build_phys_model()` in replay_sequences.py.
   Dataset regenerated and re-validated: 100/100 [OK], 100.0% accuracy. Confusion: 48 TP, 52 TN, 0 FN,
   0 FP. Physics variance: mean ≤ 0.003 rad across all label types. Outputs: sequences.json, replay.json.
+- 2026-04-11: Identified and fixed command timing approximation (RECORD_EVERY=2): between two recorded
+  frames, generator ran 10 substeps with command A then 10 with command B (B not recorded); replay applied
+  A for all 20 substeps → stale-command error. Fix: RECORD_EVERY=1 (500 frames/seq at 50 Hz vs 250 at
+  25 Hz) and replay _N_SUBSTEPS_PER_FRAME=10 (was 20). Physics variance dropped to max 0.0002 (floating-
+  point noise only). All default paths renamed to reference_ik_sequences.json / reference_ik_replay.json /
+  reference_ik_report/. Old validation files (sequences.json, replay.json, report/) removed.
+- 2026-04-11: Reward enhancements (two low-risk structural fixes, validated by replay):
+  (A) Added `grip_cube_reachable` binary term (weight 5.0): fires when gripper is squeezing the cube
+  (gripper_width = q_finger1 + q_finger2 < 0.06; contact resistance keeps sum ≈ 0.04 against 4cm cube)
+  AND cube_z > 0.05m. Bridges approach→lift reward gap. reachable_success mean reward: 672 → 1318 (+96%).
+  (B) Added `signal_reached_unreachable` binary term (weight 10.0): fires when EE within 0.05m of signal
+  position when unreachable. Mirrors lift_cube_reachable for the unreachable branch. `go_to_signal_position`
+  weight reduced from 10.0 to 1.0 (dense shaping only, binary carries primary signal). unreachable_failure
+  mean reward: 0.24 → 0.06 (much cleaner baseline — no more dense accumulation at random positions).
+  Branch gap reduced from 4× to 2.8× (unreachable_success 3744 vs reachable_success 1318). Remaining gap
+  requires early episode termination; acceptable for RL training with γ=0.99 discounting.
+  All reward logic updated in reward_utils.py (source of truth), mdp/rewards.py, mdp/__init__.py,
+  reward_eval.py. Validated: 100/100 [OK], 48 TP, 52 TN, 0 FN, 0 FP. Physics variance ≈ 0.
+  Updated analyze_results.py TERM_NAMES/REWARD_WEIGHTS (now 8 terms). Updated env cfg RewardsCfg.

@@ -22,17 +22,17 @@ Physics model mirrors the generator's phys_model exactly:
   - Same finger BOX shapes + collision groups
   - Same contact parameters (ke, kd, kf, mu)
   - Same solver (SolverMuJoCo, impratio=1000, cone=elliptic)
-  - Same substep count: 20 × 2ms per recorded frame
-    (generator: 10 substeps per outer step × record_every=2 = 20 substeps/frame)
+  - Same substep count: 10 × 2ms per recorded frame
+    (generator: 10 substeps per outer step × record_every=1 = 10 substeps/frame)
 
 Batch processing
 ----------------
 The outer loop processes sequences in batches of --num-worlds (default 16).
 Each batch:
   1. Reset all N worlds: robot → _HOME_JOINT_Q, cubes → their init positions.
-  2. For each of the 250 recorded frames:
+  2. For each of the 500 recorded frames:
        a. Set control commands from each world's recorded joint_pos_cmd.
-       b. Run 20 physics substeps (one solver.step per substep, all N worlds).
+       b. Run 10 physics substeps (one solver.step per substep, all N worlds).
        c. Read body_q / joint_q for all N worlds in one GPU→CPU sync.
        d. Compute rewards for all N worlds in one vectorized torch call.
   3. Collect per-world results.
@@ -399,9 +399,9 @@ def run_batch_replay(
         joint_q_np = state_0.joint_q.numpy()
 
         # --- Extract per-world observations ---
-        ee_pos_np   = np.empty((num_worlds, 3), dtype=np.float32)
-        cube_pos_np = np.empty((num_worlds, 3), dtype=np.float32)
-        robot_q_np  = np.empty((num_worlds, _N_ROBOT_JOINTS), dtype=np.float32)
+        ee_pos_np        = np.empty((num_worlds, 3), dtype=np.float32)
+        cube_pos_np      = np.empty((num_worlds, 3), dtype=np.float32)
+        robot_q_np       = np.empty((num_worlds, _N_ROBOT_JOINTS), dtype=np.float32)
 
         for w in range(num_worlds):
             gh = w * num_bodies_per_world + hand_local_idx
@@ -411,18 +411,23 @@ def run_batch_replay(
             base = w * n_coord_per_world
             robot_q_np[w]  = joint_q_np[base : base + _N_ROBOT_JOINTS]
 
+        # gripper_width = finger_joint1 + finger_joint2 (indices 7, 8 in robot_q)
+        gripper_width_np = robot_q_np[:, 7] + robot_q_np[:, 8]
+
         frame_dt        = _N_SUBSTEPS_PER_FRAME * _SUB_DT
         joint_vel_np    = (robot_q_np - prev_robot_q) / frame_dt
 
         # --- Vectorised reward computation for all N worlds ---
-        ee_pos_t    = torch.tensor(ee_pos_np,   device=device, dtype=torch.float32)
-        cube_pos_t  = torch.tensor(cube_pos_np, device=device, dtype=torch.float32)
-        joint_vel_t = torch.tensor(joint_vel_np, device=device, dtype=torch.float32)
-        action_curr_t = torch.tensor(ctrl_np[:, :_N_ROBOT_JOINTS], device=device, dtype=torch.float32)
-        action_prev_t = torch.tensor(prev_robot_q, device=device, dtype=torch.float32)
+        ee_pos_t         = torch.tensor(ee_pos_np,         device=device, dtype=torch.float32)
+        cube_pos_t       = torch.tensor(cube_pos_np,       device=device, dtype=torch.float32)
+        gripper_width_t  = torch.tensor(gripper_width_np,  device=device, dtype=torch.float32)
+        joint_vel_t      = torch.tensor(joint_vel_np,      device=device, dtype=torch.float32)
+        action_curr_t    = torch.tensor(ctrl_np[:, :_N_ROBOT_JOINTS], device=device, dtype=torch.float32)
+        action_prev_t    = torch.tensor(prev_robot_q,      device=device, dtype=torch.float32)
 
         rews = compute_all_rewards(
             ee_pos_w=ee_pos_t, cube_pos_w=cube_pos_t, robot_pos_w=robot_pos_t,
+            gripper_width=gripper_width_t,
             joint_vel=joint_vel_t, action_curr=action_curr_t, action_prev=action_prev_t,
             success_ee_pos=success_pos_t, signal_ee_pos=signal_pos_t,
             r_min=r_min, r_max=r_max, lift_height=lift_height,

@@ -29,7 +29,9 @@ from .rewards import (
     approach_cube_reachable,
     cube_at_success_position,
     go_to_signal_position,
+    grip_cube_reachable,
     lift_cube_reachable,
+    signal_reached_unreachable,
 )
 
 # Pure-tensor reward kernels — single source of truth, no Isaac Lab dependencies.

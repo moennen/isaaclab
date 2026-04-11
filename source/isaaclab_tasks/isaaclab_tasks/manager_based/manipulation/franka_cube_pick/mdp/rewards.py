@@ -39,7 +39,9 @@ from ..reward_utils import (
     compute_approach_cube,
     compute_cube_at_success,
     compute_go_to_signal,
+    compute_grip_cube,
     compute_lift_cube,
+    compute_signal_reached,
 )
 
 if TYPE_CHECKING:
@@ -125,13 +127,42 @@ def cube_at_success_position(
 # ---------------------------------------------------------------------------
 
 
+def grip_cube_reachable(
+    env: ManagerBasedRLEnv,
+    grip_height: float = 0.05,
+    closed_threshold: float = 0.02,
+    object_cfg: SceneEntityCfg = SceneEntityCfg("object"),
+) -> torch.Tensor:
+    """Binary reward for gripper closed with cube off ground, when reachable.
+
+    gripper_width = panda_finger_joint1 + panda_finger_joint2 (indices 7, 8).
+    Fires when gripper_width < closed_threshold AND cube_z > grip_height.
+    """
+    robot = env.scene["robot"]
+    cube: RigidObject = env.scene[object_cfg.name]
+    cube_pos_w  = cube.data.root_pos_w
+    robot_pos_w = robot.data.root_pos_w
+    # panda_finger_joint1 and panda_finger_joint2 occupy fixed indices 7, 8
+    # in the Franka joint ordering (panda_joint1..7 + two finger joints).
+    gripper_width = robot.data.joint_pos[:, 7] + robot.data.joint_pos[:, 8]
+    return compute_grip_cube(
+        cube_pos_w, robot_pos_w, gripper_width,
+        env.cfg.reachable_radius_min, env.cfg.reachable_radius_max,
+        grip_height, closed_threshold,
+    )
+
+
 def go_to_signal_position(
     env: ManagerBasedRLEnv,
     std: float,
     object_cfg: SceneEntityCfg = SceneEntityCfg("object"),
     ee_cfg: SceneEntityCfg = SceneEntityCfg("robot", body_names=["panda_hand"]),
 ) -> torch.Tensor:
-    """Reward for moving EE to the signal position, only when cube is unreachable."""
+    """Dense shaping reward for moving EE toward signal position when unreachable.
+
+    Kept at weight 1.0; the binary signal_reached_unreachable (weight 10.0)
+    is the primary completion reward.
+    """
     cube_pos_w, robot_pos_w, ee_pos_w = _get_tensors(env, object_cfg, ee_cfg)
     signal_pos = torch.tensor(
         env.cfg.signal_ee_position, device=env.device, dtype=torch.float32
@@ -139,4 +170,25 @@ def go_to_signal_position(
     return compute_go_to_signal(
         ee_pos_w, cube_pos_w, robot_pos_w, signal_pos,
         env.cfg.reachable_radius_min, env.cfg.reachable_radius_max, std,
+    )
+
+
+def signal_reached_unreachable(
+    env: ManagerBasedRLEnv,
+    signal_threshold: float = 0.05,
+    object_cfg: SceneEntityCfg = SceneEntityCfg("object"),
+    ee_cfg: SceneEntityCfg = SceneEntityCfg("robot", body_names=["panda_hand"]),
+) -> torch.Tensor:
+    """Binary reward: EE within signal_threshold of signal position when unreachable.
+
+    Mirrors lift_cube_reachable for the unreachable branch.
+    """
+    cube_pos_w, robot_pos_w, ee_pos_w = _get_tensors(env, object_cfg, ee_cfg)
+    signal_pos = torch.tensor(
+        env.cfg.signal_ee_position, device=env.device, dtype=torch.float32
+    ).unsqueeze(0)
+    return compute_signal_reached(
+        ee_pos_w, cube_pos_w, robot_pos_w, signal_pos,
+        env.cfg.reachable_radius_min, env.cfg.reachable_radius_max,
+        signal_threshold,
     )

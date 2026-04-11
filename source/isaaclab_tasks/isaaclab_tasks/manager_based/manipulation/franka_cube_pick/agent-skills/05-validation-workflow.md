@@ -46,8 +46,10 @@ Both the generator (Tool 1) and replayer (Tool 2) use the same full Newton physi
 contact period T=8.9ms. A 20ms timestep is 2× larger than T, causing numerical instability.
 10 substeps of 2ms each (matching the example's approach) resolves this.
 
-**Generator recording:** 500 outer steps × 2ms/substep × 10 substeps = 10s; records every 2nd
-outer step → 250 frames at 25Hz. Between consecutive frames: 20 substeps of 2ms = 40ms.
+**Generator recording:** 500 outer steps × 2ms/substep × 10 substeps = 10s; records every
+outer step → 500 frames at 50Hz. Between consecutive frames: 10 substeps of 2ms = 20ms.
+(RECORD_EVERY=1 eliminates timing approximation: replay applies exactly the same command
+for exactly the same substeps as the generator. Physics variance: max 0.0002 rad.)
 
 **Scripted sequences used for validation:**
 
@@ -121,11 +123,12 @@ Output JSON contains per-frame: `joint_pos` (9 values), `joint_vel` (9 values),
 
 All `--num-worlds` (default 16) sequences run simultaneously per physics step. Each batch:
 1. Reset all N worlds: robot → `_HOME_JOINT_Q`, cubes → their recorded `cube_init_pos_w`.
-2. For each of the 250 recorded frames: set joint commands from `joint_pos_cmd`, run 20 substeps, read body_q + joint_q for all N worlds in one GPU→CPU sync, compute rewards for all N in one vectorised torch call.
+2. For each of the 500 recorded frames: set joint commands from `joint_pos_cmd`, run 10 substeps, read body_q + joint_q for all N worlds in one GPU→CPU sync, compute rewards for all N in one vectorised torch call.
 3. Collect per-world results and print summary.
 
 Same Newton model as generator — identical `build_robot_builder` + `build_batched_model` calls,
-`_HOME_JOINT_Q`, finger BOX shapes, PD gains, gravcomp, contact params, solver, 20 substeps×2ms.
+`_HOME_JOINT_Q`, finger BOX shapes, PD gains, gravcomp, contact params, solver, 10 substeps×2ms.
+gripper_width for grip_cube_reachable: `robot_q_np[:, 7] + robot_q_np[:, 8]` (finger joint indices 7, 8).
 
 ```bash
 python .../scripts/replay_sequences.py [--num-worlds 16]
@@ -180,33 +183,37 @@ python source/isaaclab_tasks/isaaclab_tasks/manager_based/manipulation/franka_cu
 
 ### Reward function (standalone, in `_common/reward_eval.py`)
 
-This is the ground-truth reward implementation used for validation. It mirrors
-`mdp/rewards.py` exactly but takes plain tensors (no env object).
+Single source of truth: `reward_utils.py`. `reward_eval.py` is a thin re-export.
+`mdp/rewards.py` wraps the same kernels for the RL env.
 
 | Term | Branch | Formula | Weight |
 |---|---|---|---|
 | approach_cube_reachable | reachable | mask × (1 - tanh(‖ee - cube‖ / 0.1)) | 1.0 |
-| lift_cube_reachable | reachable | mask × indicator(cube_z > 0.45) | 10.0 |
+| grip_cube_reachable | reachable | mask × (cube_z > 0.05) × (gripper_width < 0.06) | 5.0 |
+| lift_cube_reachable | reachable | mask × indicator(cube_z > 0.5) | 10.0 |
 | cube_at_success_position | reachable | mask × lifted × (1 - tanh(‖ee - success_pos‖ / 0.1)) | 15.0 |
-| go_to_signal_position | unreachable | (1-mask) × (1 - tanh(‖ee - signal_pos‖ / 0.1)) | 10.0 |
+| go_to_signal_position | unreachable | (1-mask) × (1 - tanh(‖ee - signal_pos‖ / 0.1)) | 1.0 |
+| signal_reached_unreachable | unreachable | (1-mask) × indicator(‖ee - signal_pos‖ < 0.05) | 10.0 |
 | action_rate | always | -‖Δjoint_pos‖² | -1e-4 |
 | joint_vel | always | -‖joint_vel‖² | -1e-4 |
 
-**Physics run stats (seed=42, 100 sequences — 2026-04-10, batched Newton, correct finger commands):**
+gripper_width = finger_joint1_q + finger_joint2_q (indices 7+8 in Franka joint array).
+closed_threshold=0.06: contact resistance keeps sum ≈ 0.04 when squeezing a 4cm cube; fully open = 0.08.
 
-**100/100 [OK] — 100% accuracy.** Success/failure discriminated by `success_frame >= 0` (no threshold).
+**Current run stats (seed=42, 100 sequences — 2026-04-11, batched Newton, RECORD_EVERY=1):**
+
+**100/100 [OK] — 100% accuracy.** `success_frame >= 0` (task physically completed).
 
 | Label | N | Episode reward | Success frame | Status |
 |---|---|---|---|---|
-| reachable_success | 31 | 297–438 (mean=335) | 211–212 (all 211) | 31/31 ✓ |
-| reachable_failure | 33 | 0.11–30.9 (mean=14.4) | — | 0/33 reached success ✓ |
-| unreachable_success | 17 | 1064–1590 (mean=1360) | 35–103 (mean=67) | 17/17 ✓ |
-| unreachable_failure | 19 | 0.02–0.87 (mean=0.12) | — | 0/19 reached success ✓ |
+| reachable_success | 31 | 1265–1521 (mean=1318) | 422–423 (all ~423) | 31/31 ✓ |
+| reachable_failure | 33 | 0.22–212 (mean=44) | — | 0/33 reached success ✓ |
+| unreachable_success | 17 | 2843–4358 (mean=3744) | 70–206 (mean=135) | 17/17 ✓ |
+| unreachable_failure | 19 | 0.03–0.24 (mean=0.06) | — | 0/19 reached success ✓ |
 
-0 FN, 0 FP: 48 TP, 52 TN, confusion matrix 100% accurate.
-Reachability mask mismatches: 56/25000 (0.2%) — all in reachable_failure, within tolerance.
-Joint variance: mean ≤ 0.003 rad across all label types (max 0.019 for grip_drop_early).
-Outputs: `data/validation/sequences.json` + `replay.json` + `report/`.
+0 FN, 0 FP: 48 TP, 52 TN, 100% accuracy.
+Physics variance: max 0.0004 rad (effectively 0 — RECORD_EVERY=1 eliminates timing approximation).
+Outputs: `data/validation/reference_ik_sequences.json` + `reference_ik_replay.json` + `reference_ik_report/`.
 
 **[SUPERSEDED] Physics run stats (seed=1234, 40 sequences — 2026-04-10, old 3 failure modes):**
 40/40 [OK], 100% accuracy (threshold-based). Old failure modes (stop_short, wrong_target, signal) never
@@ -228,11 +235,11 @@ All paths default to `<task_root>/data/validation/` — run from any directory.
    ```bash
    python .../scripts/generate_sequences.py --num_sequences 100 --num-worlds 16
    ```
-   Expected: prints `Saved 100 sequences → .../franka_cube_pick/data/validation/sequences.json`
+   Expected: prints `Saved 100 sequences → .../franka_cube_pick/data/validation/reference_ik_sequences.json`
 
 2. **Replay headless**
    ```bash
-   python .../scripts/replay_sequences.py
+   python .../scripts/replay_sequences.py --num-worlds 16
    ```
    Expected: all 100 lines end with `[OK]`, no `[MISMATCH]`.
 
@@ -261,31 +268,29 @@ All paths default to `<task_root>/data/validation/` — run from any directory.
 ## Verification
 
 ```bash
-python .../scripts/analyze_results.py \
-    --input data/validation/replay.json --output /tmp/vr/
+python .../scripts/analyze_results.py
+# defaults: --input reference_ik_replay.json --output reference_ik_report/
 ```
 
 Expected output contains:
 ```
 Accuracy: 100.0%  (N sequences)
   reachable_success           : 0/... mismatches (0.0%) [OK]
-  reachable_failure           : 0/... mismatches (0.0%) [OK]
+  reachable_failure           : .../... mismatches (<1.0%) [OK]
   unreachable_success         : 0/... mismatches (0.0%) [OK]
   unreachable_failure         : 0/... mismatches (0.0%) [OK]
 
 SUCCESS FRAME SUMMARY
-  reachable_success    : N/N hit  mean_frame=211  (within 250-frame budget)
-  unreachable_success  : N/N hit  mean_frame~68
+  reachable_success    : N/N hit  mean_frame=423  (within 500-frame budget)
+  unreachable_success  : N/N hit  mean_frame~135
 
 PHYSICS VARIANCE
-  reachable_success:    mean~0.002–0.003 rad
-  unreachable_success:  mean~0.003–0.004 rad
-  reachable_failure:    mean~0.003 rad (outliers possible: stop_short IK divergence)
+  all labels: mean=0.0000  max<0.001 (effectively zero with RECORD_EVERY=1)
 ```
 
-Validated run (seed=42, 100 seqs, 2026-04-10): 100/100 OK, 100% accuracy (success_frame criterion).
-  reachable_success=335 (mean), reachable_failure=14.4 (mean, incl. approach-reward modes), unreachable_success=1360, unreachable_failure=0.12.
-  0 FN, 0 FP: 48 TP, 52 TN. Physics variance: mean ≤ 0.003 rad.
+Validated run (seed=42, 100 seqs, 2026-04-11): 100/100 OK, 100% accuracy.
+  reachable_success=1318 (mean), reachable_failure=44, unreachable_success=3744, unreachable_failure=0.06.
+  0 FN, 0 FP: 48 TP, 52 TN. Physics variance: max 0.0004 rad.
 
 Six output files written to `--output` dir:
 - `01_reward_histograms.png`
@@ -363,6 +368,11 @@ Six output files written to `--output` dir:
   Per-frame: sets ctrl from recorded joint_pos_cmd for all N worlds, runs 20 substeps, reads all-worlds
   body_q in one sync, computes rewards vectorised (N,3) torch tensors. 15 min / 100 seqs vs 47 min
   sequential (3.1× speedup). --num-worlds arg (default 16). 100/100 [OK], identical accuracy.
+- 2026-04-11: added grip_cube_reachable + signal_reached_unreachable reward terms; reduced
+  go_to_signal weight from 10.0 to 1.0 (dense shaping only). RECORD_EVERY=1 (500 frames at 50Hz
+  instead of 250 at 25Hz) eliminates timing approximation — physics variance now max 0.0004 rad.
+  Default data paths renamed to reference_ik_sequences.json / reference_ik_replay.json / reference_ik_report/.
+  Updated run stats: reachable_success=1318, unreachable_success=3744, failures≈44/0.06.
 - 2026-04-10: fixed two critical bugs in generate_sequences.py + replay_sequences.py:
   (1) generator recorded `joint_q_ik_np[w]` (IK output, finger always 0.04 open) as `joint_pos_cmd`
   instead of `ctrl_np[w, :9]` (actual control with finger override to 0.0 at grasp, 0.04 at drop).

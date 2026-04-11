@@ -57,20 +57,24 @@ LABEL_COLORS = {
 
 TERM_NAMES = [
     "approach_cube_reachable",
+    "grip_cube_reachable",
     "lift_cube_reachable",
     "cube_at_success_position",
     "go_to_signal_position",
+    "signal_reached_unreachable",
     "action_rate",
     "joint_vel",
 ]
 
 REWARD_WEIGHTS = {
-    "approach_cube_reachable":   1.0,
-    "lift_cube_reachable":      10.0,
-    "cube_at_success_position": 15.0,
-    "go_to_signal_position":    10.0,
-    "action_rate":              -1e-4,
-    "joint_vel":                -1e-4,
+    "approach_cube_reachable":    1.0,
+    "grip_cube_reachable":        5.0,
+    "lift_cube_reachable":       10.0,
+    "cube_at_success_position":  15.0,
+    "go_to_signal_position":      1.0,
+    "signal_reached_unreachable": 10.0,
+    "action_rate":               -1e-4,
+    "joint_vel":                 -1e-4,
 }
 
 

@@ -43,28 +43,47 @@ Refine the model if validation reveals misclassified cases.
 
 ### Reward Architecture
 
-Two branches gated by a float mask (1.0 = reachable, 0.0 = unreachable):
+Two symmetric branches gated by a float mask (1.0 = reachable, 0.0 = unreachable).
+Single source of truth: `reward_utils.py` — imported by both RL env and all validation tools.
 
 **Reachable branch:**
-- `approach_cube_reachable(std=0.1)` × 1.0 — EE approaches cube via tanh kernel
-- `lift_cube_reachable(lift_height=0.05)` × 10.0 — binary: cube above 5cm
-- `cube_at_success_position(std=0.1, lift_height=0.05)` × 15.0 — cube near success EE pos while lifted
+- `approach_cube_reachable(std=0.1)` × 1.0 — dense: EE approaches cube via tanh kernel
+- `grip_cube_reachable(grip_height=0.05, closed_threshold=0.06)` × 5.0 — binary: gripper closed + cube > 5 cm
+- `lift_cube_reachable(lift_height=0.5)` × 10.0 — binary: cube above 0.5 m (mid-Franka height)
+- `cube_at_success_position(std=0.1, lift_height=0.5)` × 15.0 — dense: EE at success pos while lifted
 
 **Unreachable branch:**
-- `go_to_signal_position(std=0.1)` × 10.0 — EE moves to signal position via tanh kernel
+- `go_to_signal_position(std=0.1)` × 1.0 — dense shaping only (approach gradient toward signal)
+- `signal_reached_unreachable(signal_threshold=0.05)` × 10.0 — binary: EE within 5 cm of signal pos
 
 **Penalties (always):**
 - `action_rate_l2` × -1e-4
 - `joint_vel_l2` × -1e-4
 
+**Validated episode reward (seed=42, 100 seqs, 2026-04-11):**
+
+| Label | Mean | Interpretation |
+|---|---|---|
+| reachable_success | 1318 | approach + grip + lift + at_success all fire |
+| reachable_failure | 44 | approach fires; grip may fire briefly |
+| unreachable_success | 3744 | dense approach + binary signal fires for all remaining frames |
+| unreachable_failure | 0.06 | only dense shaping accumulates (very small) |
+
+Branch gap: 2.8× (unreachable vs reachable) — remaining because unreachable reaches signal earlier
+(~frame 135) vs reachable success at frame 423. Fully equalizing requires early episode termination.
+
 ### Why this reward structure
 
 - Branches are mutually exclusive (gated mask) → gradients never mix across branches
-- Lift is binary, not tanh, because the transition from floor to lifted is qualitative
-- `cube_at_success` is conditional on `lifted` to prevent the robot earning success reward
-  without picking up the cube
-- Signal position reward uses the same tanh kernel as approach for consistency
-- Penalties are standard from the lift task — will be escalated by curriculum if needed
+- `grip_cube` bridges the approach→lift gap: without it, the agent gets no signal between
+  "EE near cube" and "cube in the air" — has to discover grasping blindly
+- `grip_cube` uses `closed_threshold=0.06`: finger contact resistance keeps q₁+q₂ ≈ 0.04 when
+  squeezing a 4 cm cube (fully open = 0.08). Threshold 0.06 fires when grasping, not when open.
+- `signal_reached` (binary, weight 10) mirrors `lift_cube` for the unreachable branch. `go_to_signal`
+  (weight 1) keeps the dense gradient but its reduced weight avoids reward dominance.
+- Lift and signal_reached are binary (not tanh): qualitative transitions from floor / away from signal
+- `cube_at_success` is conditional on `lifted` to prevent earning success reward without picking up cube
+- Penalties are standard from the lift task
 
 ## Variables — PENDING VALIDATION
 
@@ -145,3 +164,5 @@ See skill 05 for the actual validation tool.
 
 - 2026-04-08: initial version — positions and rewards PROPOSED, awaiting user validation
 - 2026-04-08: Added Newton architecture notes, dexsuite-style observation spec, removed FrameTransformer references.
+- 2026-04-11: Updated reward structure — added grip_cube_reachable and signal_reached_unreachable terms;
+  reduced go_to_signal weight from 10.0 to 1.0. Validated by toolchain replay (100/100 [OK]).
