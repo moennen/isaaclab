@@ -6,8 +6,9 @@
 """Franka Panda joint-position config for the cube pick + unreachable-signal task."""
 
 from isaaclab.assets import RigidObjectCfg
-from isaaclab.sim.schemas.schemas_cfg import RigidBodyPropertiesCfg
+from isaaclab.sim.schemas.schemas_cfg import MassPropertiesCfg, RigidBodyPropertiesCfg
 from isaaclab.sim.spawners.from_files.from_files_cfg import UsdFileCfg
+from isaaclab.sim.spawners.materials.physics_materials_cfg import RigidBodyMaterialCfg
 from isaaclab.utils import configclass
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 
@@ -44,13 +45,18 @@ class FrankaCubePickEnvCfg(FrankaCubePickEnvCfg):
         )
 
         # -- Cube object (rigid, on ground) --
-        # init_state z = 0.025 = half of 0.05m cube height — rests on ground at z=0
+        # 5 cm cube (scale=1.0) matching Newton validation: _CUBE_HALF_SIZE=0.025 m.
+        # init_state z=0.025 = half-height, resting on ground at z=0.
+        # Physics parameters match Newton standalone validation exactly:
+        #   mass=0.1 kg  (density=400 kg/m³ × (0.05 m)³)
+        #   static/dynamic friction=0.75  (Newton _CONTACT_MU=0.75)
+        #   restitution=0.0  (inelastic contacts, matches Newton ke/kd damped contact)
         self.scene.object = RigidObjectCfg(
             prim_path="{ENV_REGEX_NS}/Object",
             init_state=RigidObjectCfg.InitialStateCfg(pos=[0.5, 0.0, 0.025], rot=[1, 0, 0, 0]),
             spawn=UsdFileCfg(
                 usd_path=f"{ISAAC_NUCLEUS_DIR}/Props/Blocks/DexCube/dex_cube_instanceable.usd",
-                scale=(0.8, 0.8, 0.8),  # ~4cm cube
+                scale=(1.0, 1.0, 1.0),  # 5 cm cube — matches Newton _CUBE_HALF_SIZE=0.025
                 rigid_props=RigidBodyPropertiesCfg(
                     solver_position_iteration_count=16,
                     solver_velocity_iteration_count=1,
@@ -58,6 +64,12 @@ class FrankaCubePickEnvCfg(FrankaCubePickEnvCfg):
                     max_linear_velocity=1000.0,
                     max_depenetration_velocity=5.0,
                     disable_gravity=False,
+                ),
+                mass_props=MassPropertiesCfg(mass=0.1),  # 400 kg/m³ × (0.05)³ = 0.1 kg
+                physics_material=RigidBodyMaterialCfg(
+                    static_friction=0.75,   # Newton _CONTACT_MU=0.75
+                    dynamic_friction=0.75,
+                    restitution=0.0,        # fully inelastic — matches Newton damped contact
                 ),
             ),
         )

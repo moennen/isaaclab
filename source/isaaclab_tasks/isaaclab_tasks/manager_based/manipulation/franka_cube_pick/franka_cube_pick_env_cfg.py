@@ -54,6 +54,7 @@ from isaaclab.managers import TerminationTermCfg as DoneTerm
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sim.spawners.from_files.from_files_cfg import GroundPlaneCfg
 from isaaclab.utils import configclass
+from isaaclab_physx.physics import PhysxCfg
 
 from . import mdp
 
@@ -309,9 +310,16 @@ class FrankaCubePickEnvCfg(ManagerBasedRLEnvCfg):
     def __post_init__(self):
         self.decimation = 2
         self.episode_length_s = 8.0        # longer than lift — needs pick + transport
-        self.sim.dt = 0.01                 # 100 Hz
+        self.sim.dt = 0.01                 # 100 Hz physics; 2 × 10ms = 20ms per action (50 Hz control)
         self.sim.render_interval = self.decimation
-        self.sim.physx.bounce_threshold_velocity = 0.01
-        self.sim.physx.gpu_found_lost_aggregate_pairs_capacity = 1024 * 1024 * 4
-        self.sim.physx.gpu_total_aggregate_pairs_capacity = 16 * 1024
-        self.sim.physx.friction_correlation_distance = 0.00625
+        # Physics backend — PhysX settings tuned to match validated Newton physics as closely
+        # as possible: mu=0.75 friction, 50 Hz control rate, grasp-oriented solver ordering.
+        # solve_articulation_contact_last mirrors the contact-last ordering that Newton's
+        # MuJoCo solver uses and is critical for stable grasping in PhysX.
+        self.sim.physics = PhysxCfg(
+            bounce_threshold_velocity=0.01,
+            friction_correlation_distance=0.00625,
+            solve_articulation_contact_last=True,
+            gpu_found_lost_aggregate_pairs_capacity=1024 * 1024 * 4,
+            gpu_total_aggregate_pairs_capacity=16 * 1024,
+        )
