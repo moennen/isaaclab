@@ -34,7 +34,7 @@ Execute skills in this sequence on a clean environment:
 | 01-infrastructure.md | original |
 | 02-isaaclab-setup.md | original |
 | 03-task-structure.md | original |
-| 04-task-domain.md | original — PENDING user validation of positions and rewards; Newton + dexsuite obs updated |
+| 04-task-domain.md | original — positions/rewards validated; preset system + CuboidCfg updated 2026-04-12 |
 | 05-validation-workflow.md | original — COMPLETE 2026-04-08 (100% accuracy, 0 mask mismatches, all standalone) |
 
 ## Key Project Files
@@ -52,7 +52,7 @@ Execute skills in this sequence on a clean environment:
 ## Key Project Decisions
 
 - Task lives in `source/isaaclab_tasks/` (main `isaaclab_tasks` package — `experimental` was removed)
-- Physics engine: Newton (`feature/newton` branch) first; PhysX extension later
+- **Physics backend via `PresetCfg`**: single gym ID `Isaac-Pick-Cube-Franka-v0`; select Newton with `presets=newton`. No separate `-Newton-v0` task. `launch_simulation()` auto-detects `NewtonCfg` — no `--experience` flag needed.
 - No table — cube spawns directly on the ground plane (z=0)
 - Reachability is computed geometrically inside reward functions; the robot is NOT given it as an explicit observation
 - Two reward branches (reachable / unreachable) are gated by a float mask so gradients don't mix
@@ -61,3 +61,4 @@ Execute skills in this sequence on a clean environment:
 - Physics and rewards are validated with scripted sequences BEFORE RL training begins
 - All geometry constants (radii, target positions) live on `FrankaCubePickEnvCfg` so derived configs can override without touching reward code
 - **Shared simulation code**: reward kernels in `reward_utils.py` are used by RL training, validation tools, and unit tests — so tools validate the exact same code that runs during training
+- **Cube spawner**: `CuboidCfg(size=(0.05,0.05,0.05))` — `UsdFileCfg` has no `physics_material` field so friction + ke/kd cannot be set via constructor. Shape spawners natively support `physics_material=RigidBodyMaterialCfg(...)`.

@@ -155,10 +155,11 @@ See skill 05 for the actual validation tool.
 
 ### Newton Architecture Notes
 
-- Physics engine: `NewtonCfg` + `MJWarpSolverCfg` (replace `PhysxCfg`).
+- Physics backend is selected at CLI with `presets=newton` — no separate gym ID needed. `FrankaCubePickPhysicsCfg(PresetCfg)` holds both backends; timing scalars (`sim.dt`, `decimation`, `render_interval`) also use `preset()`. `launch_simulation()` auto-detects `NewtonCfg` — no `--experience` flag.
 - Quaternion convention: `xyzw` in Newton (vs `wxyz` in PhysX). The IsaacLab math utilities handle this internally — observation code uses standard IsaacLab `subtract_frame_transforms` and `quat_rotate_inverse` which are convention-aware.
 - DifferentialIK not available on Newton — validation scripts (generate_sequences.py, replay_sequences.py) are PhysX-only until a Newton-compatible IK is found.
 - JointPositionActionCfg and BinaryJointPositionActionCfg work on Newton (proven by `Isaac-Reach-Franka-v0` on feature/newton).
+- Cube uses `CuboidCfg(size=(0.05,0.05,0.05))` — `UsdFileCfg` has no `physics_material` field so friction and Newton ke/kd cannot be set via its constructor. Shape spawners (CuboidCfg) support `physics_material=RigidBodyMaterialCfg(...)` natively.
 
 ## Changelog
 
@@ -166,3 +167,4 @@ See skill 05 for the actual validation tool.
 - 2026-04-08: Added Newton architecture notes, dexsuite-style observation spec, removed FrameTransformer references.
 - 2026-04-11: Updated reward structure — added grip_cube_reachable and signal_reached_unreachable terms;
   reduced go_to_signal weight from 10.0 to 1.0. Validated by toolchain replay (100/100 [OK]).
+- 2026-04-12: Updated Newton architecture notes — preset system, CuboidCfg cube spawner, UsdFileCfg limitation.

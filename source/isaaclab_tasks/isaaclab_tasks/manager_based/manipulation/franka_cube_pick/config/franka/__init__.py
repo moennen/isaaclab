@@ -11,6 +11,14 @@ from . import agents
 # Register Gym environments.
 ##
 
+# Physics backend is selected at runtime via the preset system:
+#   PhysX (default):  ./isaaclab.sh -p train.py --task Isaac-Pick-Cube-Franka-v0
+#   Newton:           ./isaaclab.sh -p train.py --task Isaac-Pick-Cube-Franka-v0 presets=newton
+#
+# Newton parameters are validated against the standalone Newton simulation
+# (generate_sequences.py): solver=newton, integrator=implicitfast, iterations=20,
+# cone=elliptic, impratio=1000, 10×2ms substeps, μ=0.75, ke=5e4, kd=5e2.
+# launch_simulation() auto-detects NewtonCfg — no --experience flag needed.
 gym.register(
     id="Isaac-Pick-Cube-Franka-v0",
     entry_point="isaaclab.envs:ManagerBasedRLEnv",
@@ -26,31 +34,6 @@ gym.register(
     entry_point="isaaclab.envs:ManagerBasedRLEnv",
     kwargs={
         "env_cfg_entry_point": f"{__name__}.joint_pos_env_cfg:FrankaCubePickEnvCfg_PLAY",
-        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:FrankaCubePickPPORunnerCfg",
-    },
-    disable_env_checker=True,
-)
-
-# Newton-physics envs — timing matches validated Newton simulation exactly
-# (10 × 2ms substeps, 50Hz control rate, μ=0.75, mass=0.1kg, restitution=0.0).
-# Newton solver backend (NewtonCfg) is TODO upstream; env runs PhysX with
-# Newton-matched parameters until then.  Switch to Newton kit when ready:
-#   --experience apps/isaacsim_5/isaaclab.python.headless.newton.kit
-gym.register(
-    id="Isaac-Pick-Cube-Franka-Newton-v0",
-    entry_point="isaaclab.envs:ManagerBasedRLEnv",
-    kwargs={
-        "env_cfg_entry_point": f"{__name__}.newton_env_cfg:FrankaCubePickNewtonEnvCfg",
-        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:FrankaCubePickPPORunnerCfg",
-    },
-    disable_env_checker=True,
-)
-
-gym.register(
-    id="Isaac-Pick-Cube-Franka-Newton-Play-v0",
-    entry_point="isaaclab.envs:ManagerBasedRLEnv",
-    kwargs={
-        "env_cfg_entry_point": f"{__name__}.newton_env_cfg:FrankaCubePickNewtonEnvCfg_PLAY",
         "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:FrankaCubePickPPORunnerCfg",
     },
     disable_env_checker=True,

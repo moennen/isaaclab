@@ -54,9 +54,50 @@ from isaaclab.managers import TerminationTermCfg as DoneTerm
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sim.spawners.from_files.from_files_cfg import GroundPlaneCfg
 from isaaclab.utils import configclass
+from isaaclab_newton.physics import MJWarpSolverCfg, NewtonCfg
 from isaaclab_physx.physics import PhysxCfg
 
+from isaaclab_tasks.utils import PresetCfg, preset
+
 from . import mdp
+
+##
+# Physics backend preset
+##
+
+
+@configclass
+class FrankaCubePickPhysicsCfg(PresetCfg):
+    """Physics backend for the Franka cube pick task.
+
+    Select with ``presets=newton`` (Newton) or leave default (PhysX).
+    """
+
+    default: PhysxCfg = PhysxCfg(
+        bounce_threshold_velocity=0.01,
+        friction_correlation_distance=0.00625,
+        solve_articulation_contact_last=True,
+        gpu_found_lost_aggregate_pairs_capacity=1024 * 1024 * 4,
+        gpu_total_aggregate_pairs_capacity=16 * 1024,
+    )
+    physx: PhysxCfg = default
+    newton: NewtonCfg = NewtonCfg(
+        solver_cfg=MJWarpSolverCfg(
+            solver="newton",
+            integrator="implicitfast",
+            iterations=20,
+            ls_parallel=True,
+            ls_iterations=100,
+            cone="elliptic",
+            impratio=1000.0,
+            njmax=150,
+            nconmax=40,
+            use_mujoco_contacts=True,
+        ),
+        num_substeps=10,
+        use_cuda_graph=True,
+    )
+
 
 ##
 # Scene
@@ -308,18 +349,13 @@ class FrankaCubePickEnvCfg(ManagerBasedRLEnvCfg):
     events: EventCfg = EventCfg()
 
     def __post_init__(self):
-        self.decimation = 2
-        self.episode_length_s = 8.0        # longer than lift — needs pick + transport
-        self.sim.dt = 0.01                 # 100 Hz physics; 2 × 10ms = 20ms per action (50 Hz control)
-        self.sim.render_interval = self.decimation
-        # Physics backend — PhysX settings tuned to match validated Newton physics as closely
-        # as possible: mu=0.75 friction, 50 Hz control rate, grasp-oriented solver ordering.
-        # solve_articulation_contact_last mirrors the contact-last ordering that Newton's
-        # MuJoCo solver uses and is critical for stable grasping in PhysX.
-        self.sim.physics = PhysxCfg(
-            bounce_threshold_velocity=0.01,
-            friction_correlation_distance=0.00625,
-            solve_articulation_contact_last=True,
-            gpu_found_lost_aggregate_pairs_capacity=1024 * 1024 * 4,
-            gpu_total_aggregate_pairs_capacity=16 * 1024,
-        )
+        # decimation and sim.dt differ per backend to maintain 50 Hz control rate:
+        #   PhysX:  2 × 10 ms = 20 ms/action   Newton: 10 × 2 ms = 20 ms/action
+        self.decimation = preset(default=2, newton=10)
+        self.episode_length_s = 8.0
+        self.sim.dt = preset(default=0.01, newton=0.002)
+        self.sim.render_interval = preset(default=2, newton=10)
+        # Physics backend — select with presets=newton (Newton) or default (PhysX).
+        # Newton parameters validated against generate_sequences.py standalone simulation.
+        # PhysX parameters tuned for stable grasping (solve_articulation_contact_last).
+        self.sim.physics = FrankaCubePickPhysicsCfg()
