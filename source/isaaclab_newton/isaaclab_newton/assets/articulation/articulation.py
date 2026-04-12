@@ -187,7 +187,7 @@ class Articulation(BaseArticulation):
     @property
     def body_names(self) -> list[str]:
         """Ordered names of bodies in articulation."""
-        return self.root_view.link_names
+        return self.root_view.body_names
 
     @property
     def root_view(self) -> ArticulationView:

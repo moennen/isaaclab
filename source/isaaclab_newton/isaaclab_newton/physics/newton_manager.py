@@ -539,12 +539,11 @@ class NewtonManager(PhysicsManager):
         elif cls._solver is not None and isinstance(cls._solver, SolverMuJoCo):
             # MuJoCo contacts mode: create properly sized Contacts object
             # The solver's update_contacts() will populate this from MuJoCo data
-            rigid_contact_max = cls._solver.get_max_contact_count()
+            rigid_contact_max = cls._solver.mjw_data.naconmax
             cls._contacts = Contacts(
                 rigid_contact_max=rigid_contact_max,
                 soft_contact_max=0,
                 device=PhysicsManager._device,
-                requested_attributes=cls._model.get_requested_contact_attributes(),
             )
 
     @classmethod

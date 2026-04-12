@@ -31,6 +31,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import torch
+import warp as wp
 
 from isaaclab.assets import RigidObject
 from isaaclab.managers import SceneEntityCfg
@@ -62,12 +63,13 @@ def _get_tensors(
     robot = env.scene["robot"]
     cube: RigidObject = env.scene[object_cfg.name]
 
-    cube_pos_w  = cube.data.root_pos_w           # (N, 3)
-    robot_pos_w = robot.data.root_pos_w          # (N, 3)
+    cube_pos_w  = wp.to_torch(cube.data.root_pos_w)   # (N, 3)
+    robot_pos_w = wp.to_torch(robot.data.root_pos_w)  # (N, 3)
 
     ee_pos_w = None
     if ee_cfg is not None:
-        ee_pos_w = robot.data.body_link_pos_w[:, ee_cfg.body_ids[0], :]  # (N, 3)
+        # body_link_pos_w: warp (N, B) vec3f → torch (N, B, 3)
+        ee_pos_w = wp.to_torch(robot.data.body_link_pos_w)[:, ee_cfg.body_ids[0], :]  # (N, 3)
 
     return cube_pos_w, robot_pos_w, ee_pos_w
 
@@ -140,11 +142,12 @@ def grip_cube_reachable(
     """
     robot = env.scene["robot"]
     cube: RigidObject = env.scene[object_cfg.name]
-    cube_pos_w  = cube.data.root_pos_w
-    robot_pos_w = robot.data.root_pos_w
+    cube_pos_w  = wp.to_torch(cube.data.root_pos_w)
+    robot_pos_w = wp.to_torch(robot.data.root_pos_w)
     # panda_finger_joint1 and panda_finger_joint2 occupy fixed indices 7, 8
     # in the Franka joint ordering (panda_joint1..7 + two finger joints).
-    gripper_width = robot.data.joint_pos[:, 7] + robot.data.joint_pos[:, 8]
+    joint_pos = wp.to_torch(robot.data.joint_pos)
+    gripper_width = joint_pos[:, 7] + joint_pos[:, 8]
     return compute_grip_cube(
         cube_pos_w, robot_pos_w, gripper_width,
         env.cfg.reachable_radius_min, env.cfg.reachable_radius_max,
