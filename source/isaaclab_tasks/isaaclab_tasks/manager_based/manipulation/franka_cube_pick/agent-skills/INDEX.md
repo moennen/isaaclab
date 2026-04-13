@@ -26,6 +26,7 @@ Execute skills in this sequence on a clean environment:
 3. [03-task-structure.md](03-task-structure.md) — Understand and create the experimental task package structure
 4. [04-task-domain.md](04-task-domain.md) — Task-specific design: geometry, rewards, observations
 5. [05-validation-workflow.md](05-validation-workflow.md) — Validate physics, rewards and observations before RL
+6. [06-newton-backend-pitfalls.md](06-newton-backend-pitfalls.md) — Newton backend integration pitfalls: 6 bug classes with fixes
 
 ## Skill Provenance
 
@@ -36,6 +37,7 @@ Execute skills in this sequence on a clean environment:
 | 03-task-structure.md | original |
 | 04-task-domain.md | original — positions/rewards validated; preset system + CuboidCfg updated 2026-04-12 |
 | 05-validation-workflow.md | original — COMPLETE 2026-04-08 (100% accuracy, 0 mask mismatches, all standalone) |
+| 06-newton-backend-pitfalls.md | original — documents 6 bug classes hit and fixed 2026-04-13 during Newton training bring-up |
 
 ## Key Project Files
 
