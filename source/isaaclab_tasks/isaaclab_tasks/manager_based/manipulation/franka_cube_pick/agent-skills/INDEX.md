@@ -27,6 +27,7 @@ Execute skills in this sequence on a clean environment:
 4. [04-task-domain.md](04-task-domain.md) — Task-specific design: geometry, rewards, observations
 5. [05-validation-workflow.md](05-validation-workflow.md) — Validate physics, rewards and observations before RL
 6. [06-newton-backend-pitfalls.md](06-newton-backend-pitfalls.md) — Newton backend integration pitfalls: 6 bug classes with fixes
+7. [07-vbd-task-pattern.md](07-vbd-task-pattern.md) — VBD soft-body task pattern: franka_vbd_cube_pick reference implementation
 
 ## Skill Provenance
 
@@ -38,6 +39,7 @@ Execute skills in this sequence on a clean environment:
 | 04-task-domain.md | original — positions/rewards validated; preset system + CuboidCfg updated 2026-04-12 |
 | 05-validation-workflow.md | original — COMPLETE 2026-04-08 (100% accuracy, 0 mask mismatches, all standalone) |
 | 06-newton-backend-pitfalls.md | original — documents 6 bug classes hit and fixed 2026-04-13 during Newton training bring-up |
+| 07-vbd-task-pattern.md | original — VBD task pattern from franka_vbd_cube_pick implementation 2026-04-13 |
 
 ## Key Project Files
 
@@ -50,6 +52,12 @@ Execute skills in this sequence on a clean environment:
 | `scripts/replay_sequences.py` | Tool 2 — Newton FK standalone replayer + reward evaluator |
 | `scripts/analyze_results.py` | Tool 3 — statistical report generator (pure Python) |
 | `scripts/visualize_sequence.py` | Tool 4 — Newton ViewerGL interactive visualizer |
+
+## Related Task: franka_vbd_cube_pick
+
+The `../franka_vbd_cube_pick/` task extends this task to use a VBD deformable cube.
+Key differences: no `scene.object`, cube managed by `FrankaVbdCubePickNewtonManager`,
+cube pose read from manager obs-cache. See [07-vbd-task-pattern.md](07-vbd-task-pattern.md).
 
 ## Key Project Decisions
 
