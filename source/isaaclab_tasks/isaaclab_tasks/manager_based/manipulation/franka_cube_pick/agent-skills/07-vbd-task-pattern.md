@@ -257,18 +257,25 @@ Training command:
 ## 6. Newton package requirements
 
 The following patches must be applied to `/home/horde/projects/newton` before
-a VBD task can run at scale (committed as `36a67b8` in the newton repo):
+a VBD task can run at scale.  Commits on branch `nicolasm/isaaclab-task-skills`:
 
-| File | Change |
-|---|---|
-| `newton/_src/geometry/kernels.py` | Add `create_soft_contacts_batched` kernel |
-| `newton/_src/sim/collide.py` | Import + dispatch `create_soft_contacts_batched` when `particles_per_world` set |
-| `newton/_src/sim/contacts.py` | Add `soft_contact_tids_dim` param to avoid int32 overflow at 4096 envs |
-| `newton/_src/solvers/vbd/solver_vbd.py` | Add `max_soft_contacts` + `particle_max_velocity` params |
+| Commit | File | Change |
+|---|---|---|
+| `36a67b8` | `newton/_src/geometry/kernels.py` | Add `create_soft_contacts_batched` kernel |
+| `36a67b8` | `newton/_src/sim/collide.py` | Import + dispatch `create_soft_contacts_batched` when `particles_per_world` set |
+| `36a67b8` | `newton/_src/sim/contacts.py` | Add `soft_contact_tids_dim` param to avoid int32 overflow at 4096 envs |
+| `36a67b8` | `newton/_src/solvers/vbd/solver_vbd.py` | Add `max_soft_contacts` + `particle_max_velocity` params |
+| `837d80e` | `newton/_src/solvers/vbd/particle_vbd_kernels.py` | Add `clamp_particle_inertia` Warp kernel |
+| `837d80e` | `newton/_src/solvers/vbd/solver_vbd.py` | Call `clamp_particle_inertia` in `initialize_particles()` |
 
 Without these patches:
 - `soft_contact_max = P × S × num_envs` overflows int32 at 4096 envs
 - VBD NaN explosions at first particle-rigid contact (no velocity clamping)
+
+**Note on velocity clamping:** The dexsuite branch's `_penetration_free_truncation` uses
+a `particle_displacements` array populated by a different `forward_step` kernel signature.
+The port here is equivalent for the non-self-contact case: `clamp_particle_inertia` acts
+directly on `state_in.particle_q` using `particle_q_prev` (set inside `forward_step`).
 
 ---
 
