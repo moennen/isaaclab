@@ -296,3 +296,51 @@ directly on `state_in.particle_q` using `particle_q_prev` (set inside `forward_s
    `builder.default_particle_radius` before calling it.
 6. **No `preset()` for Newton-only tasks** — `preset()` requires a `default`
    key.  Hard-code `decimation`, `sim.dt`, etc. directly.
+7. **`HeightfieldData` not defined in this Newton version** — our commit `36a67b8`
+   accidentally included `shape_heightfield_data` / `heightfield_elevation_data`
+   parameters (copied from dexsuite) in `create_soft_contacts_batched`.  Fixed in
+   commit `ed62423`: those parameters removed.  Update before running standalone scripts.
+
+---
+
+## 8. Validation workflow (follow skill 05 pattern)
+
+Before RL training, run the full validation sequence in `scripts/`:
+
+```bash
+cd source/isaaclab_tasks/isaaclab_tasks/manager_based/manipulation/franka_vbd_cube_pick
+
+# Step 1 — Generate scripted sequences (physics validation)
+micromamba run -n env_isaaclab python scripts/generate_sequences.py \
+    --num_sequences 100 --num-worlds 4 \
+    --output data/validation/vbd_sequences.json
+
+# Step 2 — Replay sequences (reward validation)
+micromamba run -n env_isaaclab python scripts/replay_sequences.py \
+    --input  data/validation/vbd_sequences.json \
+    --output data/validation/vbd_replay.json \
+    --num-worlds 4
+
+# Step 3 — Analyze results (reward + observation report)
+micromamba run -n env_isaaclab python scripts/analyze_results.py \
+    --input  data/validation/vbd_replay.json \
+    --output data/validation/vbd_report/
+```
+
+**Physics validation pass criteria** (generator output):
+- No `NaN!` lines in output — all cube CoMs remain finite
+- `peak_z > 0` for reachable sequences — cube moves when gripper contacts it
+- cube_pos_w[2] ≈ 0.025 at t=0 (resting on ground)
+
+**Reward validation pass criteria** (analyzer report):
+- ≥ 80% label-reward correlation (expected_high_reward matches actual episode reward rank)
+- reachable_success > reachable_failure (approach + lift rewards non-zero)
+- unreachable_success > unreachable_failure (signal rewards fire)
+- 0 mask mismatches (reachability mask always matches cube position label)
+
+**Key VBD-specific differences from rigid validation** (skill 05):
+- `cube_pos_w` in sequences is particle CoM (not rigid body joint_q)
+- No CUDA graph in standalone scripts (eager mode; CollisionPipeline warm-up outside loop)
+- Grasping success rate will be LOWER than rigid — deformable cube is harder to grip
+  with scripted IK; expect peak_z < 0.45 for most reachable sequences
+- Physics validation primarily checks: no NaN, cube contacts ground, cube responds to gripper

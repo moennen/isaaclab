@@ -286,3 +286,54 @@ The project's validation phase is complete when:
   `UsdFileCfg` (no `physics_material` field) to `CuboidCfg(size=(0.05,0.05,0.05))` with
   `physics_material=RigidBodyMaterialCfg(mu=0.75, ke=5e4, kd=5e2)`. Verified: both backends
   instantiate cleanly; `presets=newton` resolves to `NewtonCfg`, decimation=10, dt=0.002.
+
+---
+
+## franka_vbd_cube_pick Extension
+
+*Extension task using VBD (Vertex Block Descent) deformable cube physics.*
+*Task lives in `../franka_vbd_cube_pick/`. All decisions below are additive — base rigid task decisions still apply.*
+
+### Problem Statement (VBD)
+
+The same pick-or-signal task but with a deformable cube simulated via VBD (FEM tetrahedral mesh, Vertex Block Descent solver). Validates that the validation + RL pipeline works end-to-end with a non-rigid object, and that two-way rigid-soft coupling produces physically realistic grasping.
+
+### Additional Requirements
+
+**F10 — Deformable cube**
+- F10.1: Cube is a VBD soft body created via `add_soft_grid()` (not a rigid asset).  No `scene.object` entry in the Isaac Lab scene.
+- F10.2: Cube geometry: `cube_resolution=3` → `(R+1)³=64` particles, `5R³=135` tets.
+- F10.3: Material: Young's modulus + Poisson's ratio exposed in config; Lamé (k_mu, k_lambda) computed in manager.
+- F10.4: `k_damp` and `soft_contact_kd` MUST stay ≈1e-5 (position-level stiffness multipliers — NOT velocity damping).
+- F10.5: Cube CoM position = mean of particle positions per env.  Orientation = Kabsch SVD alignment vs rest pose.
+- F10.6: Newton-only task (no PhysX equivalent).  Hardcoded: `decimation=10`, `sim.dt=0.002`, `num_substeps=10`.
+
+**F11 — Two-way coupling**
+- F11.1: Same-substep operator splitting: detect soft contacts → write reactions into `state.body_f` → rigid MuJoCo step → VBD step.
+- F11.2: Full Coulomb friction coupling (not normal-only): finger actuators feel tangential friction load from cube.
+- F11.3: Coupling shared in `physics/vbd_coupling.py` — imported by manager, standalone scripts, and tests.
+
+**F12 — Newton package patches** (branch `nicolasm/isaaclab-task-skills` in newton repo)
+- F12.1: `create_soft_contacts_batched` kernel (`36a67b8`) — batched collision avoids int32 overflow at 4096 envs.
+- F12.2: `clamp_particle_inertia` kernel (`837d80e`) — velocity clamping prevents NaN at first rigid-VBD contact.
+- F12.3: `HeightfieldData` bug fix (`ed62423`) — removes undefined type from kernel signature.
+
+**F13 — VBD validation toolchain**
+- F13.1: `scripts/generate_sequences.py` — standalone VBD sequence generator (robot + VBD soft grid, two-phase stepping, particle CoM tracking).
+- F13.2: `scripts/replay_sequences.py` — replays generated sequences in VBD physics, computes VBD reward terms.
+- F13.3: `scripts/analyze_results.py` — same analysis as rigid task (task-independent).
+- F13.4: Same JSON schema as rigid task (`_common/sequence_schema.py`).
+- F13.5: `cube_pos_w` in sequences = particle CoM (not rigid body joint_q).
+- F13.6: No CUDA graph in standalone scripts (eager mode; VBD+CollisionPipeline warm-up outside loop).
+
+### Gym IDs
+
+- `Isaac-Pick-VBD-Cube-Franka-v0` — training (requires `presets=newton`)
+- `Isaac-Pick-VBD-Cube-Franka-Play-v0` — play (16 envs)
+
+### Decision Log (VBD extension)
+
+- 2026-04-13: VBD task created (`6ab65e7`).  16 files: env cfg, physics manager, MDP layer, gym registration, skill 07.
+  Key design: no `scene.object`; cube managed by `FrankaVbdCubePickNewtonManager`; graph coloring via manual tet edge build (not `construct_particle_graph` which doesn't exist in this Newton).
+- 2026-04-13: Newton VBD patches committed (`36a67b8`, `837d80e`, `ed62423`): batched collision kernel, velocity clamping, HeightfieldData fix.  All three needed before any VBD simulation can run.
+- 2026-04-13: Validation scripts created (`scripts/`): generate_sequences.py, replay_sequences.py, analyze_results.py — follow same pattern as rigid skill 05.  **Validation not yet run** (PENDING).
