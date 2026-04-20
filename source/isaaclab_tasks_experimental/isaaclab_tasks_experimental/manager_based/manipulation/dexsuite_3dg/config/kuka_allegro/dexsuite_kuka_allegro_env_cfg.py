@@ -1,0 +1,222 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
+from isaaclab_physx.physics import PhysxCfg
+
+from isaaclab.assets import ArticulationCfg, RigidObjectCfg
+from isaaclab.managers import RewardTermCfg as RewTerm
+from isaaclab.managers import SceneEntityCfg
+from isaaclab.sensors import ContactSensorCfg, TiledCameraCfg
+from isaaclab.utils import configclass
+
+from isaaclab_tasks.utils import PresetCfg
+
+from isaaclab_assets.robots import KUKA_ALLEGRO_CFG
+
+from ... import dexsuite_env_cfg as dexsuite
+from ... import mdp
+from .camera_cfg import (
+    BaseTiledCameraCfg,
+    DuoCameraObservationsCfg,
+    SingleCameraObservationsCfg,
+    StateObservationCfg,
+    WristTiledCameraCfg,
+)
+from .physic.kaolin import SimplicitsObjectCfg
+from .physic.newton import Dexsuite3dgNewtonCfg
+from .physic.newton.simplicits_object_adapter import (
+    SimplicitsObjectAdapter,
+    SimplicitsObjectAdapterCfg,
+)
+
+FINGERTIP_LIST = ["index_link_3", "middle_link_3", "ring_link_3", "thumb_link_3"]
+THUMB_SENSOR = "thumb_link_3_object_s"
+FINGER_SENSORS = [f"{name}_object_s" for name in FINGERTIP_LIST if name != "thumb_link_3"]
+
+
+@configclass
+class KukaAllegroPhysicsCfg(PresetCfg):
+    """Physics presets for Kuka Allegro Dexsuite 3dg. Default is Newton (extended manager)."""
+
+    default = Dexsuite3dgNewtonCfg()
+    newton = default
+    simplicits = Dexsuite3dgNewtonCfg(
+        simplicits_enabled=True,
+        simplicits_cfg=SimplicitsObjectCfg(),
+        use_cuda_graph=False,
+    )
+    """Newton with the spawn object as Simplicits particles (``env.sim.physics=simplicits``).
+
+    - **CUDA graph:** Off so the two-phase step (rigid then Simplicits) runs every tick.
+    """
+
+    simplicits_matched = Dexsuite3dgNewtonCfg(
+        object_contact_ke=500.0,
+        object_contact_kd=45.0,
+    )
+    """Rigid Newton with Object contact stiffness matched to Simplicits soft-penalty physics.
+
+    Use this preset to retrain a policy that transfers to Simplicits deployment without
+    contact-stiffness mismatch.
+
+    The values replicate the Simplicits effective contact spring seen by the robot::
+
+        ke_eff = soft_contact_ke × soft_contact_coeff = 1e4 × 0.05 = 500 N/m
+        kd_eff = 2 × sqrt(ke_eff) ≈ 45 N·s/m   (critical damping; timeconst ≈ 0.044 s > 2 × dt)
+
+    Also update the scene to match Simplicits object mass and friction:
+    ``env.scene=simplicits_matched  env.sim.physics=simplicits_matched``
+    """
+    physx = PhysxCfg(
+        bounce_threshold_velocity=0.01,
+        gpu_max_rigid_patch_count=4 * 5 * 2**15,
+        gpu_found_lost_pairs_capacity=2**26,
+        gpu_found_lost_aggregate_pairs_capacity=2**29,
+        gpu_total_aggregate_pairs_capacity=2**25,
+    )
+
+
+@configclass
+class KukaAllegroSceneCfg(PresetCfg):
+    @configclass
+    class KukaAllegroSceneCfg(dexsuite.SceneCfg):
+        """Kuka Allegro participant scene for Dexsuite Lifting/Reorientation"""
+
+        robot: ArticulationCfg = KUKA_ALLEGRO_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
+
+        base_camera: TiledCameraCfg | None = None
+
+        wrist_camera: TiledCameraCfg | None = None
+
+        # Override object to use cuboid-only MultiAsset so Newton/MuJoCo worlds are
+        # homogeneous (all shape type 7 = box). The parent dexsuite.SceneCfg default
+        # uses ``ObjectCfg().shapes`` which mixes cuboids, spheres, capsules, and cones —
+        # different Newton shape type codes — causing:
+        #   "SolverMuJoCo requires homogeneous worlds. Shape types mismatch …"
+        object: RigidObjectCfg = RigidObjectCfg(
+            prim_path="{ENV_REGEX_NS}/Object",
+            spawn=dexsuite.ObjectCfg().shapes_newton,
+            init_state=RigidObjectCfg.InitialStateCfg(pos=(-0.55, 0.0, 0.555)),
+        )
+
+        def __post_init__(self: dexsuite.SceneCfg):
+            super().__post_init__()
+            for link_name in FINGERTIP_LIST:
+                setattr(
+                    self,
+                    f"{link_name}_object_s",
+                    ContactSensorCfg(
+                        prim_path="{ENV_REGEX_NS}/Robot/ee_link/" + link_name,
+                        filter_prim_paths_expr=["{ENV_REGEX_NS}/Object"],
+                    ),
+                )
+
+    default = KukaAllegroSceneCfg(num_envs=4096, env_spacing=3, replicate_physics=True)
+    single_camera = default.replace(base_camera=BaseTiledCameraCfg())
+    duo_camera = default.replace(base_camera=BaseTiledCameraCfg(), wrist_camera=WristTiledCameraCfg())
+    # Use SimplicitsObjectAdapter for object when running with env.sim.physics=simplicits.
+    simplicits = default.replace(
+        object=SimplicitsObjectAdapterCfg(
+            prim_path=default.object.prim_path,
+            spawn=default.object.spawn,
+            init_state=default.object.init_state,
+            class_type=SimplicitsObjectAdapter,
+        )
+    )
+    # Rigid cube with mass/friction matched to Simplicits for retraining.
+    # Pair with env.sim.physics=simplicits_matched to also set ke=500 N/m contact stiffness.
+    simplicits_matched = default.replace(
+        object=default.object.replace(spawn=dexsuite.ObjectCfg().simplicits_matched)
+    )
+
+
+@configclass
+class KukaAllegroRelJointPosActionCfg:
+    action = mdp.RelativeJointPositionActionCfg(asset_name="robot", joint_names=[".*"], scale=0.1)
+
+
+@configclass
+class KukaAllegroReorientRewardCfg(dexsuite.RewardsCfg):
+    good_finger_contact = RewTerm(
+        func=mdp.contacts,
+        weight=0.5,
+        params={"threshold": 0.1, "thumb_name": THUMB_SENSOR, "finger_names": FINGER_SENSORS},
+    )
+
+    contact_count = RewTerm(
+        func=mdp.contact_count,
+        weight=1.0,
+        params={
+            "threshold": 0.01,
+            "sensor_names": FINGER_SENSORS + [THUMB_SENSOR],
+        },
+    )
+
+    def __post_init__(self: dexsuite.RewardsCfg):
+        super().__post_init__()
+        self.fingers_to_object.params["asset_cfg"] = SceneEntityCfg("robot", body_names=["palm_link", ".*_tip"])
+        self.fingers_to_object.params["thumb_name"] = THUMB_SENSOR
+        self.fingers_to_object.params["finger_names"] = FINGER_SENSORS
+        self.position_tracking.params["thumb_name"] = THUMB_SENSOR
+        self.position_tracking.params["finger_names"] = FINGER_SENSORS
+        if self.orientation_tracking:
+            self.orientation_tracking.params["thumb_name"] = THUMB_SENSOR
+            self.orientation_tracking.params["finger_names"] = FINGER_SENSORS
+        self.success.params["thumb_name"] = THUMB_SENSOR
+        self.success.params["finger_names"] = FINGER_SENSORS
+
+
+@configclass
+class KukaAllegroObservationCfg(PresetCfg):
+    state = StateObservationCfg()
+    single_camera = SingleCameraObservationsCfg()
+    duo_camera = DuoCameraObservationsCfg()
+    default = state
+
+
+@configclass
+class KukaAllegroEventCfg(PresetCfg):
+    """Event presets. Default/newton use reset-only events; physx adds startup domain randomization."""
+
+    @configclass
+    class KukaAllegroPhysxEventCfg(dexsuite.StartupEventCfg, dexsuite.EventCfg):
+        pass
+
+    default = dexsuite.EventCfg()
+    newton = default
+    physx = KukaAllegroPhysxEventCfg()
+
+
+@configclass
+class KukaAllegroMixinCfg:
+    scene: KukaAllegroSceneCfg = KukaAllegroSceneCfg()
+    rewards: KukaAllegroReorientRewardCfg = KukaAllegroReorientRewardCfg()
+    observations: KukaAllegroObservationCfg = KukaAllegroObservationCfg()
+    events: KukaAllegroEventCfg = KukaAllegroEventCfg()
+    actions: KukaAllegroRelJointPosActionCfg = KukaAllegroRelJointPosActionCfg()
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.sim.physics = KukaAllegroPhysicsCfg()
+
+
+@configclass
+class Dexsuite3dgKukaAllegroReorientEnvCfg(KukaAllegroMixinCfg, dexsuite.Dexsuite3dgReorientEnvCfg):
+    pass
+
+
+@configclass
+class Dexsuite3dgKukaAllegroReorientEnvCfg_PLAY(KukaAllegroMixinCfg, dexsuite.Dexsuite3dgReorientEnvCfg_PLAY):
+    pass
+
+
+@configclass
+class Dexsuite3dgKukaAllegroLiftEnvCfg(KukaAllegroMixinCfg, dexsuite.Dexsuite3dgLiftEnvCfg):
+    pass
+
+
+@configclass
+class Dexsuite3dgKukaAllegroLiftEnvCfg_PLAY(KukaAllegroMixinCfg, dexsuite.Dexsuite3dgLiftEnvCfg_PLAY):
+    pass
