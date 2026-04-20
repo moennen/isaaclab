@@ -27,12 +27,10 @@ except OSError:
     except OSError:
         _cudart = None
 from newton import Axis, CollisionPipeline, Contacts, Control, Model, ModelBuilder, State, eval_fk
-from newton._src.usd.schemas import SchemaResolverNewton, SchemaResolverPhysx
 from newton.sensors import SensorContact as NewtonContactSensor
 from newton.solvers import SolverBase, SolverFeatherstone, SolverMuJoCo, SolverNotifyFlags, SolverXPBD
 
 from isaaclab.physics import PhysicsEvent, PhysicsManager
-from isaaclab.sim.utils.stage import get_current_stage
 from isaaclab.utils.timer import Timer
 
 if TYPE_CHECKING:
@@ -428,6 +426,19 @@ class NewtonManager(PhysicsManager):
         cls._control = cls._model.control()
         eval_fk(cls._model, cls._state_0.joint_q, cls._state_0.joint_qd, cls._state_0, None)
 
+        # When called via super() from a subclass (e.g. FrankaVbdCubePickNewtonManager),
+        # Python's classmethod dispatch sets cls to the subclass, so `cls._model = X` creates
+        # a new attribute on the subclass — leaving NewtonManager._model = None.
+        # Assets (articulation, rigid object) import `NewtonManager as SimulationManager` and
+        # call SimulationManager.get_model() with cls=NewtonManager, returning the base-class
+        # None.  Propagate all simulation state to the base class to ensure consistent access.
+        if cls is not NewtonManager:
+            NewtonManager._model = cls._model
+            NewtonManager._state_0 = cls._state_0
+            NewtonManager._state_1 = cls._state_1
+            NewtonManager._control = cls._control
+            NewtonManager._builder = cls._builder
+
         logger.info("Dispatching PHYSICS_READY callbacks")
         cls.dispatch_event(PhysicsEvent.PHYSICS_READY)
 
@@ -438,6 +449,8 @@ class NewtonManager(PhysicsManager):
             body_paths = getattr(cls._model, "body_label", None) or getattr(cls._model, "body_key", None)
             if body_paths is None:
                 raise RuntimeError("NewtonManager: model has no body_label/body_key, skipping USD/Fabric sync for RTX.")
+            from isaaclab.sim.utils.stage import get_current_stage  # noqa: PLC0415
+
             cls._usdrt_stage = get_current_stage(fabric=True)
             for i, prim_path in enumerate(body_paths):
                 prim = cls._usdrt_stage.GetPrimAtPath(prim_path)
@@ -464,7 +477,8 @@ class NewtonManager(PhysicsManager):
         """
         import re
 
-        from pxr import UsdGeom
+        from isaaclab.sim.utils.stage import get_current_stage  # noqa: PLC0415
+        from pxr import UsdGeom  # noqa: PLC0415
 
         stage = get_current_stage()
         up_axis = UsdGeom.GetStageUpAxis(stage)
@@ -481,6 +495,8 @@ class NewtonManager(PhysicsManager):
         env_paths.sort(key=lambda x: x[0])
 
         builder = ModelBuilder(up_axis=up_axis)
+
+        from newton._src.usd.schemas import SchemaResolverNewton, SchemaResolverPhysx  # noqa: PLC0415
 
         schema_resolvers = [SchemaResolverNewton(), SchemaResolverPhysx()]
 

@@ -27,6 +27,30 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _flat2d(arr: wp.array) -> wp.array:
+    """Flatten Newton's 3D (world_count, count_per_world, dof) to 2D (num_instances, dof).
+
+    Newton ≥ multi-artic API returns (world_count, count_per_world, dof_count).
+    Kernels written for the old API expect (num_instances, dof_count).
+    When count_per_world == 1, reinterpret the memory as 2D without copying.
+    """
+    if arr.ndim != 3:
+        return arr
+    worlds, cpp, dof = arr.shape
+    if cpp != 1:
+        raise RuntimeError(
+            f"_flat2d: count_per_world={cpp} > 1 not supported; got array shape {arr.shape}"
+        )
+    return wp.array(
+        ptr=arr.ptr,
+        dtype=arr.dtype,
+        shape=(worlds, dof),
+        strides=(arr.strides[0], arr.strides[2]),
+        device=arr.device,
+        copy=False,
+    )
+
+
 class ArticulationData(BaseArticulationData):
     """Data container for an articulation.
 
@@ -1216,22 +1240,34 @@ class ArticulationData(BaseArticulationData):
         self._num_fixed_tendons = 0  # self._root_view.max_fixed_tendons
         self._num_spatial_tendons = 0  # self._root_view.max_spatial_tendons
 
+        def _sq(arr: wp.array) -> wp.array:
+            """Squeeze Newton's count_per_world=1 dim: (W, 1) → (W,) or (W, 1, X) → (W, X).
+
+            Newton ≥ multi-artic API inserts a count_per_world dimension at index 1.
+            When count_per_world == 1, remove it so downstream code sees the old 1D/2D shape.
+            """
+            if arr.ndim == 2 and arr.shape[1] == 1:
+                return arr[:, 0]
+            if arr.ndim == 3 and arr.shape[1] == 1:
+                return arr[:, 0, :]
+            return arr
+
         # -- root properties
-        self._sim_bind_root_link_pose_w = self._root_view.get_root_transforms(SimulationManager.get_state_0())
+        self._sim_bind_root_link_pose_w = _sq(self._root_view.get_root_transforms(SimulationManager.get_state_0()))
         self._sim_bind_root_com_vel_w = self._root_view.get_root_velocities(SimulationManager.get_state_0())
         if self._sim_bind_root_com_vel_w is not None:
             if self._root_view.is_fixed_base:
                 self._sim_bind_root_com_vel_w = self._sim_bind_root_com_vel_w[:, 0, 0]
             else:
-                self._sim_bind_root_com_vel_w = self._sim_bind_root_com_vel_w[:, 0]
+                self._sim_bind_root_com_vel_w = _sq(self._sim_bind_root_com_vel_w)
         # -- body properties
-        self._sim_bind_body_com_pos_b = self._root_view.get_attribute("body_com", SimulationManager.get_model())
-        self._sim_bind_body_link_pose_w = self._root_view.get_link_transforms(SimulationManager.get_state_0())
-        self._sim_bind_body_com_vel_w = self._root_view.get_link_velocities(SimulationManager.get_state_0())
+        self._sim_bind_body_com_pos_b = _sq(self._root_view.get_attribute("body_com", SimulationManager.get_model()))
+        self._sim_bind_body_link_pose_w = _sq(self._root_view.get_link_transforms(SimulationManager.get_state_0()))
+        self._sim_bind_body_com_vel_w = _sq(self._root_view.get_link_velocities(SimulationManager.get_state_0()))
         # Newton stores body_inertia as (N, B) mat33f. Reinterpret as (N, B, 9) float32 via pointer aliasing.
         # Each mat33f element is 9 contiguous float32 values (36 bytes), so the inner stride is 4.
         # The slice may be non-contiguous in the outer dims, so we preserve those strides.
-        _body_inertia_raw = self._root_view.get_attribute("body_inertia", SimulationManager.get_model())
+        _body_inertia_raw = _sq(self._root_view.get_attribute("body_inertia", SimulationManager.get_model()))
         self._sim_bind_body_inertia = wp.array(
             ptr=_body_inertia_raw.ptr,
             dtype=wp.float32,
@@ -1240,55 +1276,55 @@ class ArticulationData(BaseArticulationData):
             device=_body_inertia_raw.device,
             copy=False,
         )
-        self._sim_bind_body_mass = self._root_view.get_attribute("body_mass", SimulationManager.get_model())
-        self._sim_bind_body_external_wrench = self._root_view.get_attribute(
+        self._sim_bind_body_mass = _sq(self._root_view.get_attribute("body_mass", SimulationManager.get_model()))
+        self._sim_bind_body_external_wrench = _sq(self._root_view.get_attribute(
             "body_f", SimulationManager.get_state_0()
-        )
+        ))
         try:
-            self._sim_bind_body_parent_f = self._root_view.get_attribute(
+            self._sim_bind_body_parent_f = _sq(self._root_view.get_attribute(
                 "body_parent_f", SimulationManager.get_state_0()
-            )
+            ))
         except Exception:
             self._sim_bind_body_parent_f = None
         # -- joint properties
         if self._num_joints > 0:
-            self._sim_bind_joint_pos_limits_lower = self._root_view.get_attribute(
+            self._sim_bind_joint_pos_limits_lower = _flat2d(self._root_view.get_attribute(
                 "joint_limit_lower", SimulationManager.get_model()
-            )
-            self._sim_bind_joint_pos_limits_upper = self._root_view.get_attribute(
+            ))
+            self._sim_bind_joint_pos_limits_upper = _flat2d(self._root_view.get_attribute(
                 "joint_limit_upper", SimulationManager.get_model()
-            )
-            self._sim_bind_joint_stiffness_sim = self._root_view.get_attribute(
+            ))
+            self._sim_bind_joint_stiffness_sim = _flat2d(self._root_view.get_attribute(
                 "joint_target_ke", SimulationManager.get_model()
-            )
-            self._sim_bind_joint_damping_sim = self._root_view.get_attribute(
+            ))
+            self._sim_bind_joint_damping_sim = _flat2d(self._root_view.get_attribute(
                 "joint_target_kd", SimulationManager.get_model()
-            )
-            self._sim_bind_joint_armature = self._root_view.get_attribute(
+            ))
+            self._sim_bind_joint_armature = _flat2d(self._root_view.get_attribute(
                 "joint_armature", SimulationManager.get_model()
-            )
-            self._sim_bind_joint_friction_coeff = self._root_view.get_attribute(
+            ))
+            self._sim_bind_joint_friction_coeff = _flat2d(self._root_view.get_attribute(
                 "joint_friction", SimulationManager.get_model()
-            )
-            self._sim_bind_joint_vel_limits_sim = self._root_view.get_attribute(
+            ))
+            self._sim_bind_joint_vel_limits_sim = _flat2d(self._root_view.get_attribute(
                 "joint_velocity_limit", SimulationManager.get_model()
-            )
-            self._sim_bind_joint_effort_limits_sim = self._root_view.get_attribute(
+            ))
+            self._sim_bind_joint_effort_limits_sim = _flat2d(self._root_view.get_attribute(
                 "joint_effort_limit", SimulationManager.get_model()
-            )
+            ))
             # -- joint states
-            self._sim_bind_joint_pos = self._root_view.get_dof_positions(SimulationManager.get_state_0())
-            self._sim_bind_joint_vel = self._root_view.get_dof_velocities(SimulationManager.get_state_0())
+            self._sim_bind_joint_pos = _flat2d(self._root_view.get_dof_positions(SimulationManager.get_state_0()))
+            self._sim_bind_joint_vel = _flat2d(self._root_view.get_dof_velocities(SimulationManager.get_state_0()))
             # -- joint commands (sent to the simulation)
-            self._sim_bind_joint_effort = self._root_view.get_attribute(
+            self._sim_bind_joint_effort = _flat2d(self._root_view.get_attribute(
                 "joint_f", SimulationManager.get_control()
-            )
-            self._sim_bind_joint_position_target = self._root_view.get_attribute(
+            ))
+            self._sim_bind_joint_position_target = _flat2d(self._root_view.get_attribute(
                 "joint_target_pos", SimulationManager.get_control()
-            )
-            self._sim_bind_joint_velocity_target = self._root_view.get_attribute(
+            ))
+            self._sim_bind_joint_velocity_target = _flat2d(self._root_view.get_attribute(
                 "joint_target_vel", SimulationManager.get_control()
-            )
+            ))
         else:
             # No joints (e.g., free-floating rigid body) - set bindings to empty arrays
             self._sim_bind_joint_pos_limits_lower = wp.zeros(
@@ -1383,7 +1419,7 @@ class ArticulationData(BaseArticulationData):
         # Initialize history for finite differencing
         if self._num_joints > 0:
             self._previous_joint_vel = wp.clone(
-                self._root_view.get_dof_velocities(SimulationManager.get_state_0())
+                _flat2d(self._root_view.get_dof_velocities(SimulationManager.get_state_0()))
             )
         else:
             self._previous_joint_vel = wp.zeros((self._num_instances, 0), dtype=wp.float32, device=self.device)

@@ -12,15 +12,13 @@ import warp as wp
 from newton import ModelBuilder, solvers
 from newton._src.usd.schemas import SchemaResolverNewton, SchemaResolverPhysx
 
-from pxr import Usd, UsdGeom
-
 from isaaclab.physics.scene_data_requirements import VisualizerPrebuiltArtifacts
 
 from isaaclab_newton.physics import NewtonManager
 
 
 def _build_newton_builder_from_mapping(
-    stage: Usd.Stage,
+    stage,  # Usd.Stage
     sources: list[str],
     env_ids: torch.Tensor,
     mapping: torch.Tensor,
@@ -127,7 +125,7 @@ def _rename_builder_labels(
 
 
 def newton_physics_replicate(
-    stage: Usd.Stage,
+    stage,  # Usd.Stage
     sources: list[str],
     destinations: list[str],
     env_ids: torch.Tensor,
@@ -172,7 +170,7 @@ def newton_physics_replicate(
 
 
 def newton_visualizer_prebuild(
-    stage: Usd.Stage,
+    stage,  # Usd.Stage
     sources: list[str],
     destinations: list[str],
     env_ids: torch.Tensor,
@@ -232,6 +230,7 @@ def create_newton_visualizer_prebuild_clone_fn(
     Returns:
         Clone callback that builds and stores visualizer prebuilt artifacts.
     """
+    from pxr import UsdGeom  # noqa: PLC0415
     up_axis = UsdGeom.GetStageUpAxis(stage)
 
     def _visualizer_clone_fn(
