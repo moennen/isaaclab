@@ -3,29 +3,34 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""Installation script for the 'isaaclab_ov' python package."""
+"""Installation script for the 'isaaclab_ppisp' python package."""
 
 import os
+import shutil
 
 import toml
 from setuptools import setup
+from setuptools.command.build_py import build_py as _build_py
 
-# Obtain the extension data from the extension.toml file
+
+class build_py(_build_py):
+    """Custom build command that bundles config/extension.toml into the package."""
+
+    def run(self):
+        super().run()
+        src = os.path.join(EXTENSION_PATH, "config", "extension.toml")
+        dst_dir = os.path.join(self.build_lib, "isaaclab_ppisp", "config")
+        os.makedirs(dst_dir, exist_ok=True)
+        shutil.copy(src, os.path.join(dst_dir, "extension.toml"))
+
+
 EXTENSION_PATH = os.path.dirname(os.path.realpath(__file__))
-# Read the extension.toml file
 EXTENSION_TOML_DATA = toml.load(os.path.join(EXTENSION_PATH, "config", "extension.toml"))
 
-EXTRAS_REQUIRE = {
-    "ovrtx": [
-        "ovrtx>=0.3.0,<0.4.0",
-    ],
-}
-
-# add "[all]" for convenience
-EXTRAS_REQUIRE["all"] = sorted(set(dep for deps in EXTRAS_REQUIRE.values() for dep in deps))
+INSTALL_REQUIRES = []
 
 setup(
-    name="isaaclab_ov",
+    name="isaaclab_ppisp",
     author="Isaac Lab Project Developers",
     maintainer="Isaac Lab Project Developers",
     url=EXTENSION_TOML_DATA["package"]["repository"],
@@ -34,13 +39,16 @@ setup(
     keywords=EXTENSION_TOML_DATA["package"]["keywords"],
     license="BSD-3-Clause",
     include_package_data=True,
+    package_data={"": ["*.pyi"]},
     python_requires=">=3.12",
-    install_requires=["isaaclab_ppisp"],
-    extras_require=EXTRAS_REQUIRE,
-    packages=["isaaclab_ov"],
+    install_requires=INSTALL_REQUIRES,
+    packages=[
+        "isaaclab_ppisp",
+    ],
     classifiers=[
         "Natural Language :: English",
         "Programming Language :: Python :: 3.12",
     ],
     zip_safe=False,
+    cmdclass={"build_py": build_py},
 )
