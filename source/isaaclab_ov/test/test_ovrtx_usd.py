@@ -22,14 +22,20 @@ pytestmark = [
 
 if not _MISSING_MODULES:
     from isaaclab_ov.renderers.ovrtx_usd import (  # noqa: E402
-        build_render_scope_usd,
+        build_render_product_on_stage,
         get_render_var_config,
         get_render_var_configs,
+        stage_from_string,
     )
+
+    from pxr import Sdf, Usd  # noqa: E402
 else:
-    build_render_scope_usd = None
+    Sdf = None
+    Usd = None
+    build_render_product_on_stage = None
     get_render_var_config = None
     get_render_var_configs = None
+    stage_from_string = None
 
 
 def test_ovrtx_rgb_hdr_uses_hdr_color_render_var():
@@ -46,17 +52,64 @@ def test_ovrtx_rgb_and_rgb_hdr_author_both_render_vars():
         ("/Render/Vars/HdrColor", "HdrColor", "HdrColor"),
     ]
 
-    render_scope = build_render_scope_usd(
-        camera_paths=["/World/envs/env_0/Camera"],
-        render_product_name="RenderProduct",
-        render_var_path=render_var_configs[0][0],
-        render_var_name=render_var_configs[0][1],
-        source_name=render_var_configs[0][2],
-        tiled_width=16,
-        tiled_height=8,
-        render_var_configs=render_var_configs,
+    stage = Usd.Stage.CreateInMemory()
+    render_product_path = build_render_product_on_stage(
+        stage=stage,
+        width=16,
+        height=8,
+        num_envs=1,
+        data_types=["rgb", "rgb_hdr"],
+        camera_rel_path="Camera",
     )
 
-    assert "rel orderedVars = [</Render/Vars/LdrColor>, </Render/Vars/HdrColor>]" in render_scope
-    assert 'def RenderVar "LdrColor"' in render_scope
-    assert 'def RenderVar "HdrColor"' in render_scope
+    assert stage.GetPrimAtPath(render_product_path).GetRelationship("orderedVars").GetTargets() == [
+        Sdf.Path("/Render/Vars/LdrColor"),
+        Sdf.Path("/Render/Vars/HdrColor"),
+    ]
+    assert stage.GetPrimAtPath("/Render/Vars/LdrColor").IsValid()
+    assert stage.GetPrimAtPath("/Render/Vars/HdrColor").IsValid()
+
+
+def test_ovrtx_build_render_product_on_stage_authors_equivalent_render_vars():
+    """The stage-authoring path creates the expected OVRTX RenderProduct prims."""
+    stage = Usd.Stage.CreateInMemory()
+
+    render_product_path = build_render_product_on_stage(
+        stage=stage,
+        width=16,
+        height=8,
+        num_envs=1,
+        data_types=["rgb", "rgb_hdr"],
+        camera_rel_path="Camera",
+        render_product_name="IsaacLabRenderProduct",
+    )
+
+    render_product = stage.GetPrimAtPath(render_product_path)
+    assert render_product.IsValid()
+    assert render_product.GetRelationship("camera").GetTargets() == [Sdf.Path("/World/envs/env_0/Camera")]
+    assert render_product.GetRelationship("orderedVars").GetTargets() == [
+        Sdf.Path("/Render/Vars/LdrColor"),
+        Sdf.Path("/Render/Vars/HdrColor"),
+    ]
+    assert stage.GetPrimAtPath("/Render/Vars/LdrColor").GetAttribute("sourceName").Get() == "LdrColor"
+    assert stage.GetPrimAtPath("/Render/Vars/HdrColor").GetAttribute("sourceName").Get() == "HdrColor"
+
+
+def test_ovrtx_build_render_product_on_temp_stage_keeps_source_stage_unchanged():
+    """Native-SPG render product injection happens on export scratch USD, not the live stage."""
+    source_stage = Usd.Stage.CreateInMemory()
+    source_stage.DefinePrim("/World/envs/env_0/Camera", "Camera")
+    temp_stage = stage_from_string(source_stage.ExportToString())
+
+    build_render_product_on_stage(
+        stage=temp_stage,
+        width=16,
+        height=8,
+        num_envs=1,
+        data_types=["rgb"],
+        camera_rel_path="Camera",
+        render_product_name="IsaacLabRenderProduct",
+    )
+
+    assert not source_stage.GetPrimAtPath("/Render/IsaacLabRenderProduct").IsValid()
+    assert temp_stage.GetPrimAtPath("/Render/IsaacLabRenderProduct").IsValid()

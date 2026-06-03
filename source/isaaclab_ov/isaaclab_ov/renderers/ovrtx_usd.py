@@ -3,12 +3,12 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""USD manipulation for OVRTX: Render scope building, camera injection, and stage prim activation."""
+"""USD manipulation for OVRTX: RenderProduct authoring, camera injection, and stage prim activation."""
 
 import logging
 import math
 
-from pxr import Sdf, Usd, UsdGeom
+from pxr import Gf, Sdf, Usd, UsdGeom
 
 logger = logging.getLogger(__name__)
 
@@ -49,78 +49,6 @@ def get_render_var_configs(data_types: list[str]) -> list[tuple[str, str, str]]:
     return render_vars
 
 
-def build_render_scope_usd(
-    camera_paths: list[str],
-    render_product_name: str,
-    render_var_path: str,
-    render_var_name: str,
-    source_name: str,
-    tiled_width: int,
-    tiled_height: int,
-    minimal_mode: int | None = None,
-    render_var_configs: list[tuple[str, str, str]] | None = None,
-) -> str:
-    """Build the Render scope USD string (def Scope Render, RenderProduct, Vars).
-
-    Args:
-        camera_paths: List of camera prim paths.
-        render_product_name: Name of the render product.
-        render_var_path: Path of the render variable.
-        render_var_name: Name of the render variable.
-        source_name: Name of the source.
-        tiled_width: Width of the tiled image.
-        tiled_height: Height of the tiled image.
-        minimal_mode: RTX minimal mode. None if not requested. Valid values are 1, 2, 3.
-        render_var_configs: Render variables to author. Uses the single render var arguments if not provided.
-
-    Returns:
-        The USD string for the render scope.
-    """
-    camera_rel_list = ", ".join([f"<{p}>" for p in camera_paths])
-
-    if minimal_mode is None:
-        render_mode_lines = ['token omni:rtx:rendermode = "RealTimePathTracing"']
-    else:
-        render_mode_lines = [
-            'token omni:rtx:rendermode = "Minimal"',
-            f"int omni:rtx:minimal:mode = {minimal_mode}",
-        ]
-
-    render_mode_block = "\n        ".join(render_mode_lines)
-    if render_var_configs is None:
-        render_var_configs = [(render_var_path, render_var_name, source_name)]
-    ordered_vars = ", ".join(f"<{path}>" for path, _, _ in render_var_configs)
-    render_var_defs = "\n".join(
-        f'''        def RenderVar "{name}"
-        {{
-            uniform string sourceName = "{source}"
-        }}'''
-        for _, name, source in render_var_configs
-    )
-
-    return f'''
-def Scope "Render"
-{{
-    def RenderProduct "{render_product_name}" (
-        prepend apiSchemas = ["OmniRtxSettingsCommonAdvancedAPI_1"]
-    ) {{
-        rel camera = [{camera_rel_list}]
-        token omni:rtx:background:source:type = "domeLight"
-        float omni:rtx:rt:ambientLight:intensity = 1.0
-        {render_mode_block}
-        token[] omni:rtx:waitForEvents = ["AllLoadingFinished", "OnlyOnFirstRequest"]
-        rel orderedVars = [{ordered_vars}]
-        uniform int2 resolution = ({tiled_width}, {tiled_height})
-    }}
-
-    def "Vars"
-    {{
-{render_var_defs}
-    }}
-}}
-'''
-
-
 def _tiled_resolution(num_envs: int, width: int, height: int) -> tuple[int, int]:
     """Compute tiled width and height from env count and per-env resolution (same as Camera)."""
     num_cols = math.ceil(math.sqrt(num_envs))
@@ -128,51 +56,78 @@ def _tiled_resolution(num_envs: int, width: int, height: int) -> tuple[int, int]
     return num_cols * width, num_rows * height
 
 
-def build_render_product_as_string(
+def build_render_product_on_stage(
+    stage: Usd.Stage,
     width: int,
     height: int,
     num_envs: int,
     data_types: list[str],
     minimal_mode: int | None = None,
     camera_rel_path: str = "Camera",
-) -> tuple[str, str]:
-    """Build the render product USD snippet as a string.
+    render_product_name: str = "RenderProduct",
+) -> str:
+    """Author the OVRTX render product directly on ``stage``.
 
-    This string is meant to be appended to an exported stage (ASCII) before loading into OVRTX.
-
-    Args:
-        width: Tile width from sensor config [px].
-        height: Tile height from sensor config [px].
-        num_envs: Number of environments from scene.
-        data_types: Data types from sensor config.
-        minimal_mode: RTX minimal mode. None if not requested. Valid values are 1, 2, 3.
-        camera_rel_path: Camera prim path relative to the env root (e.g. ``"Camera"`` or ``"Robot/head_cam"``).
-
-    Returns:
-        Tuple of (render product USD snippet as a string, absolute render product prim path).
+    Callers author this on an anonymous copy of the exported simulation stage
+    before exporting the complete stage string consumed by OVRTX.
     """
     data_types = data_types if data_types else ["rgb"]
     tiled_width, tiled_height = _tiled_resolution(num_envs, width, height)
 
     camera_paths = [f"/World/envs/env_{i}/{camera_rel_path}" for i in range(num_envs)]
-    render_product_name = "RenderProduct"
     render_product_path = f"/Render/{render_product_name}"
-
     render_var_configs = get_render_var_configs(data_types)
-    render_var_path, render_var_name, source_name = render_var_configs[0]
 
-    camera_content = build_render_scope_usd(
-        camera_paths,
-        render_product_name,
-        render_var_path,
-        render_var_name,
-        source_name,
-        tiled_width,
-        tiled_height,
-        minimal_mode,
-        render_var_configs,
+    stage.DefinePrim("/Render", "Scope")
+    render_product = stage.DefinePrim(render_product_path, "RenderProduct")
+    _prepend_api_schema(render_product, "OmniRtxSettingsCommonAdvancedAPI_1")
+    render_product.CreateRelationship("camera").SetTargets([Sdf.Path(path) for path in camera_paths])
+    render_product.CreateAttribute("omni:rtx:background:source:type", Sdf.ValueTypeNames.Token).Set("domeLight")
+    render_product.CreateAttribute("omni:rtx:rt:ambientLight:intensity", Sdf.ValueTypeNames.Float).Set(1.0)
+    render_product.CreateAttribute("omni:rtx:rendermode", Sdf.ValueTypeNames.Token).Set(
+        "RealTimePathTracing" if minimal_mode is None else "Minimal"
     )
-    return camera_content, render_product_path
+    if minimal_mode is not None:
+        render_product.CreateAttribute("omni:rtx:minimal:mode", Sdf.ValueTypeNames.Int).Set(minimal_mode)
+    render_product.CreateAttribute("omni:rtx:waitForEvents", Sdf.ValueTypeNames.TokenArray).Set(
+        ["AllLoadingFinished", "OnlyOnFirstRequest"]
+    )
+    render_product.CreateAttribute("resolution", Sdf.ValueTypeNames.Int2).Set(Gf.Vec2i(tiled_width, tiled_height))
+
+    stage.DefinePrim("/Render/Vars")
+    render_var_targets = []
+    for render_var_path, _, source_name in render_var_configs:
+        render_var = stage.DefinePrim(render_var_path, "RenderVar")
+        render_var.CreateAttribute(
+            "sourceName",
+            Sdf.ValueTypeNames.String,
+            custom=False,
+            variability=Sdf.VariabilityUniform,
+        ).Set(source_name)
+        render_var_targets.append(Sdf.Path(render_var_path))
+    render_product.CreateRelationship("orderedVars").SetTargets(render_var_targets)
+    return render_product_path
+
+
+def stage_from_string(root_layer_content: str) -> Usd.Stage:
+    """Create an anonymous USD stage from exported root-layer content."""
+    root_layer = Sdf.Layer.CreateAnonymous("ovrtx_renderer_stage.usda")
+    if not root_layer.ImportFromString(root_layer_content):
+        raise RuntimeError("Failed to import exported OVRTX USD string into a temporary USD stage.")
+    stage = Usd.Stage.Open(root_layer)
+    if stage is None:
+        raise RuntimeError("Failed to open temporary OVRTX USD stage from imported string.")
+    return stage
+
+
+def _prepend_api_schema(prim: Usd.Prim, schema_name: str) -> None:
+    schemas = Sdf.TokenListOp()
+    current = prim.GetMetadata("apiSchemas") or Sdf.TokenListOp()
+    items = list(current.prependedItems) if current.prependedItems else []
+    if schema_name not in items:
+        items.append(schema_name)
+    schemas.prependedItems = items
+    prim.SetMetadata("apiSchemas", schemas)
 
 
 def create_scene_partition_attributes(

@@ -57,6 +57,24 @@ SIMPLE_SHADING_MODES = {
     "simple_shading_full_mdl": 3,
 }
 SIMPLE_SHADING_MODE_SETTING = "/rtx/minimal/mode"
+SPG_EXTENSION_NAME = "omni.rtx.spg"
+SPG_ENABLED_SETTING = "/rtx/spg/enabled"
+
+
+def _enable_native_spg_runtime() -> None:
+    """Enable Kit's SPG extension and runtime setting for native PPISP graphs."""
+    try:
+        from isaacsim.core.experimental.utils.app import enable_extension
+    except ImportError as exc:
+        raise RuntimeError(
+            f"Native PPISP SPG requires the '{SPG_EXTENSION_NAME}' Kit extension, but the extension helper could"
+            " not be imported. Ensure Isaac Sim is running with Kit extensions available."
+        ) from exc
+
+    settings = get_settings_manager()
+    settings.set_bool(SPG_ENABLED_SETTING, True)
+    enable_extension(SPG_EXTENSION_NAME)
+    settings.set_bool(SPG_ENABLED_SETTING, True)
 
 
 def _camera_semantic_filter_predicate(semantic_filter: str | list[str]) -> str:
@@ -107,17 +125,27 @@ class IsaacRtxRenderer(BaseRenderer):
         """Resolve the camera's PPISP cfg and apply RTX-specific USD overrides.
 
         First resolves ``spec.cfg.isp_cfg`` (sentinel discovery + normalization)
-        via :func:`isaaclab_ppisp.resolve_and_normalize` so :mod:`isaaclab` does
-        not need to know about PPISP. Then, when an ISP is configured, pins
-        ``exposure:*`` to neutral and applies ``OmniRtxCameraExposureAPI_1`` so
-        RTX's physical-camera exposure model does not compound on top of the
-        ISP. Without an ISP, the camera prim's authored exposure is left alone.
+        for RTX's native-SPG path so controller sidecar weights are not parsed
+        unnecessarily. If the resolved graph cannot run natively, resolves again
+        with controller weights loaded for the Warp fallback. Then, when an ISP
+        is configured, pins ``exposure:*`` to neutral and applies
+        ``OmniRtxCameraExposureAPI_1`` so RTX's physical camera exposure model
+        does not compound on top of the ISP. Without an ISP, the camera prim's
+        authored exposure is left alone.
         """
         if not spec.camera_prim_paths:
             return
-        from isaaclab_ppisp import apply_rtx_exposure_overrides, resolve_and_normalize
+        from isaaclab_ppisp import (
+            apply_rtx_exposure_overrides,
+            ppisp_uses_native_spg,
+            resolve_and_normalize,
+            resolve_and_normalize_for_native_spg,
+        )
 
-        spec.cfg.isp_cfg = resolve_and_normalize(spec.cfg.isp_cfg, stage, spec.camera_prim_paths[0])
+        isp_cfg = resolve_and_normalize_for_native_spg(spec.cfg.isp_cfg, stage, spec.camera_prim_paths[0])
+        if isp_cfg is not None and not ppisp_uses_native_spg(isp_cfg):
+            isp_cfg = resolve_and_normalize(spec.cfg.isp_cfg, stage, spec.camera_prim_paths[0])
+        spec.cfg.isp_cfg = isp_cfg
         if spec.cfg.isp_cfg is None:
             return
         apply_rtx_exposure_overrides(stage, list(spec.camera_prim_paths))
@@ -176,6 +204,11 @@ class IsaacRtxRenderer(BaseRenderer):
 
         settings = get_settings_manager()
         isaac_sim_version = get_isaac_sim_version()
+        from isaaclab_ppisp import copy_ppisp_spg_to_render_product, ppisp_uses_native_spg
+
+        uses_native_ppisp_spg = ppisp_uses_native_spg(spec.cfg.isp_cfg)
+        if uses_native_ppisp_spg:
+            _enable_native_spg_runtime()
 
         if isaac_sim_version.major >= 6:
             needs_color_render = any(
@@ -238,8 +271,13 @@ class IsaacRtxRenderer(BaseRenderer):
             if simple_shading_mode is not None:
                 get_settings_manager().set_int(SIMPLE_SHADING_MODE_SETTING, simple_shading_mode)
 
+        if uses_native_ppisp_spg:
+            copy_ppisp_spg_to_render_product(stage, spec.cfg.isp_cfg.spg_render_product_prim_path, rp.path)
+
         needs_hdr_color = str(RenderBufferKind.RGB_HDR) in spec.cfg.data_types or (
-            spec.cfg.isp_cfg is not None and any(data_type in ("rgb", "rgba") for data_type in spec.cfg.data_types)
+            spec.cfg.isp_cfg is not None
+            and not uses_native_ppisp_spg
+            and any(data_type in ("rgb", "rgba") for data_type in spec.cfg.data_types)
         )
         if needs_hdr_color:
             rep.AnnotatorRegistry.register_annotator_from_aov(
@@ -250,7 +288,7 @@ class IsaacRtxRenderer(BaseRenderer):
         annotators = {}
         for annotator_type in spec.cfg.data_types:
             if annotator_type == "rgba" or annotator_type == "rgb":
-                if spec.cfg.isp_cfg is not None:
+                if spec.cfg.isp_cfg is not None and not uses_native_ppisp_spg:
                     if str(RenderBufferKind.RGB_HDR) not in annotators:
                         annotator = rep.AnnotatorRegistry.get_annotator(
                             "HdrColor", device=spec.device, do_array_copy=False
@@ -309,7 +347,7 @@ class IsaacRtxRenderer(BaseRenderer):
             annotator.attach(render_product_paths)
 
         ppisp_pipeline = None
-        if spec.cfg.isp_cfg is not None:
+        if spec.cfg.isp_cfg is not None and not uses_native_ppisp_spg:
             from isaaclab_ppisp import PpispPipeline
 
             ppisp_pipeline = PpispPipeline(spec.cfg.isp_cfg, stage=stage)

@@ -21,22 +21,25 @@ import contextlib
 import math
 import os
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import torch
 from isaaclab_ppisp import PpispCfg, normalize_ppisp_cfg
 
-from pxr import Gf, Sdf, Usd, UsdGeom
+from pxr import Gf, Sdf, Usd, UsdGeom, UsdShade
 
 import isaaclab.sim as sim_utils
 from isaaclab.assets import AssetBaseCfg, RigidObjectCfg
 from isaaclab.scene import InteractiveScene, InteractiveSceneCfg
 from isaaclab.sensors.camera import Camera, CameraCfg
+from isaaclab.sensors.camera.camera_isp import CameraISPMode
 from isaaclab.terrains import TerrainImporterCfg
 from isaaclab.utils.configclass import configclass
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
+    from os import PathLike
 
     from isaaclab.renderers.renderer_cfg import RendererCfg
     from isaaclab.sim import SimulationCfg, SimulationContext
@@ -229,6 +232,452 @@ _AGGRESSIVE_VIGNETTING_ALPHA1 = -1.8
 # separately via :func:`make_aggressive_ppisp_cfg`'s ``responsivity`` kwarg.
 _AGGRESSIVE_EXPOSURE_OFFSET = -5.0
 
+_PPISP_SPG_SOURCE_RENDER_PRODUCT_PATH = "/Render/PPISPSource"
+
+_PPISP_CONTROLLER_EXPECTED_WEIGHTS_LEN = 241_961
+_PPISP_CONTROLLER_EMBEDDED_WEIGHTS_MARKER = "// __PPISP_CONTROLLER_EMBEDDED_WEIGHTS__"
+_PPISP_CONTROLLER_OFF_CONV1_W = 0
+_PPISP_CONTROLLER_OFF_CONV1_B = _PPISP_CONTROLLER_OFF_CONV1_W + 16 * 3
+_PPISP_CONTROLLER_OFF_CONV2_W = _PPISP_CONTROLLER_OFF_CONV1_B + 16
+_PPISP_CONTROLLER_OFF_CONV2_B = _PPISP_CONTROLLER_OFF_CONV2_W + 32 * 16
+_PPISP_CONTROLLER_OFF_CONV3_W = _PPISP_CONTROLLER_OFF_CONV2_B + 32
+_PPISP_CONTROLLER_OFF_CONV3_B = _PPISP_CONTROLLER_OFF_CONV3_W + 64 * 32
+_PPISP_CONTROLLER_OFF_TRUNK0_W = _PPISP_CONTROLLER_OFF_CONV3_B + 64
+_PPISP_CONTROLLER_OFF_TRUNK0_B = _PPISP_CONTROLLER_OFF_TRUNK0_W + 128 * 1601
+_PPISP_CONTROLLER_OFF_TRUNK1_W = _PPISP_CONTROLLER_OFF_TRUNK0_B + 128
+_PPISP_CONTROLLER_OFF_TRUNK1_B = _PPISP_CONTROLLER_OFF_TRUNK1_W + 128 * 128
+_PPISP_CONTROLLER_OFF_TRUNK2_W = _PPISP_CONTROLLER_OFF_TRUNK1_B + 128
+_PPISP_CONTROLLER_OFF_TRUNK2_B = _PPISP_CONTROLLER_OFF_TRUNK2_W + 128 * 128
+_PPISP_CONTROLLER_OFF_EXP_W = _PPISP_CONTROLLER_OFF_TRUNK2_B + 128
+_PPISP_CONTROLLER_OFF_EXP_B = _PPISP_CONTROLLER_OFF_EXP_W + 128
+_PPISP_CONTROLLER_OFF_COL_W = _PPISP_CONTROLLER_OFF_EXP_B + 1
+_PPISP_CONTROLLER_OFF_COL_B = _PPISP_CONTROLLER_OFF_COL_W + 8 * 128
+
+_PPISP_CONTROLLER_TOTAL_WEIGHTS = _PPISP_CONTROLLER_OFF_COL_B + 8
+if _PPISP_CONTROLLER_TOTAL_WEIGHTS != _PPISP_CONTROLLER_EXPECTED_WEIGHTS_LEN:
+    raise RuntimeError(
+        "Synthetic PPISP controller fixture offsets are inconsistent: "
+        f"{_PPISP_CONTROLLER_TOTAL_WEIGHTS} != {_PPISP_CONTROLLER_EXPECTED_WEIGHTS_LEN}."
+    )
+
+_SYNTHETIC_STATIC_PPISP_CUDA = """
+static __device__ __forceinline__ float clamp01(float value) {
+    return fminf(fmaxf(value, 0.0f), 1.0f);
+}
+
+static __device__ __forceinline__ unsigned char toU8(float value) {
+    return static_cast<unsigned char>(clamp01(value) * 255.0f);
+}
+
+static __device__ __forceinline__ float applyVignetting(
+    float value,
+    float u,
+    float v,
+    float centerX,
+    float centerY,
+    float alpha1,
+    float alpha2,
+    float alpha3) {
+    const float dx = u - centerX;
+    const float dy = v - centerY;
+    const float r2 = dx * dx + dy * dy;
+    const float r4 = r2 * r2;
+    const float r6 = r4 * r2;
+    return value * clamp01(1.0f + alpha1 * r2 + alpha2 * r4 + alpha3 * r6);
+}
+
+extern "C" __global__ void ppispProcess(
+    int width,
+    int height,
+    cudaTextureObject_t inHdrColor,
+    const float* __restrict__ params,
+    cudaSurfaceObject_t outPPISPColor) {
+    const int x = blockIdx.x * blockDim.x + threadIdx.x;
+    const int y = blockIdx.y * blockDim.y + threadIdx.y;
+    if (x >= width || y >= height) {
+        return;
+    }
+
+    const float4 pixel = tex2D<float4>(inHdrColor, x, y);
+    const float exposureScale = params[0] * exp2f(params[1]);
+    float r = pixel.x * exposureScale;
+    float g = pixel.y * exposureScale;
+    float b = pixel.z * exposureScale;
+
+    const float maxRes = fmaxf(float(width), float(height));
+    const float u = (float(x) + 0.5f - float(width) * 0.5f) / maxRes;
+    const float v = (float(y) + 0.5f - float(height) * 0.5f) / maxRes;
+    r = applyVignetting(r, u, v, params[2], params[3], params[4], params[5], params[6]);
+    g = applyVignetting(g, u, v, params[7], params[8], params[9], params[10], params[11]);
+    b = applyVignetting(b, u, v, params[12], params[13], params[14], params[15], params[16]);
+
+    const uchar4 out = {toU8(r), toU8(g), toU8(b), 255};
+    surf2Dwrite<uchar4>(out, outPPISPColor, x * int(sizeof(uchar4)), y);
+}
+""".lstrip()
+
+_SYNTHETIC_STATIC_PPISP_LUA = """
+function ppispProcess(inputs, outputs)
+    local in_hdr = inputs["HdrColor"]
+    assert(in_hdr and in_hdr.rank == 2, "HdrColor input must be a 2D texture")
+
+    local height = in_hdr.shape[1]
+    local width = in_hdr.shape[2]
+    outputs["PPISPColor"] = cuda.image(width, height, cuda.uchar4)
+
+    local function getFloat(name, default)
+        return cuda.float(inputs[name] or default).value
+    end
+
+    local function getFloat2(name)
+        local value = inputs[name]
+        local packed = value and cuda.float2(value) or cuda.float2(0.0, 0.0)
+        return packed.value
+    end
+
+    local vignettingCenterR = getFloat2("vignettingCenterR")
+    local vignettingCenterG = getFloat2("vignettingCenterG")
+    local vignettingCenterB = getFloat2("vignettingCenterB")
+    local params = {
+        getFloat("responsivity", 1.0),
+        getFloat("exposureOffset", 0.0),
+        vignettingCenterR[1],
+        vignettingCenterR[2],
+        getFloat("vignettingAlpha1R", 0.0),
+        getFloat("vignettingAlpha2R", 0.0),
+        getFloat("vignettingAlpha3R", 0.0),
+        vignettingCenterG[1],
+        vignettingCenterG[2],
+        getFloat("vignettingAlpha1G", 0.0),
+        getFloat("vignettingAlpha2G", 0.0),
+        getFloat("vignettingAlpha3G", 0.0),
+        vignettingCenterB[1],
+        vignettingCenterB[2],
+        getFloat("vignettingAlpha1B", 0.0),
+        getFloat("vignettingAlpha2B", 0.0),
+        getFloat("vignettingAlpha3B", 0.0),
+    }
+
+    return cuda.kernel({
+        args = {
+            cuda.int(width),
+            cuda.int(height),
+            cuda.TextureObject(in_hdr),
+            cuda.array(params, cuda.float),
+            cuda.SurfaceObject(outputs["PPISPColor"]),
+        },
+        block = { 16, 16, 1 },
+        grid = { math.ceil(width / 16), math.ceil(height / 16), 1 },
+    })
+end
+""".lstrip()
+
+_SYNTHETIC_STATIC_PPISP_USDA = """
+#usda 1.0
+(
+    defaultPrim = "PPISP"
+)
+
+def Shader "PPISP"
+{
+    uniform token info:implementationSource = "sourceAsset"
+    uniform asset info:spg:sourceAsset = @./ppisp_usd_spg.cu@
+    uniform token info:spg:sourceAsset:subIdentifier = "ppispProcess"
+
+    float inputs:responsivity = 1.0
+    float inputs:exposureOffset = 0.0
+
+    float2 inputs:vignettingCenterR = (0.0, 0.0)
+    float inputs:vignettingAlpha1R = 0.0
+    float inputs:vignettingAlpha2R = 0.0
+    float inputs:vignettingAlpha3R = 0.0
+
+    float2 inputs:vignettingCenterG = (0.0, 0.0)
+    float inputs:vignettingAlpha1G = 0.0
+    float inputs:vignettingAlpha2G = 0.0
+    float inputs:vignettingAlpha3G = 0.0
+
+    float2 inputs:vignettingCenterB = (0.0, 0.0)
+    float inputs:vignettingAlpha1B = 0.0
+    float inputs:vignettingAlpha2B = 0.0
+    float inputs:vignettingAlpha3B = 0.0
+
+    float2 inputs:colorLatentBlue = (0.0, 0.0)
+    float2 inputs:colorLatentRed = (0.0, 0.0)
+    float2 inputs:colorLatentGreen = (0.0, 0.0)
+    float2 inputs:colorLatentNeutral = (0.0, 0.0)
+
+    float inputs:crfToeR = 0.013659
+    float inputs:crfShoulderR = 0.013659
+    float inputs:crfGammaR = 0.378165
+    float inputs:crfCenterR = 0.0
+
+    float inputs:crfToeG = 0.013659
+    float inputs:crfShoulderG = 0.013659
+    float inputs:crfGammaG = 0.378165
+    float inputs:crfCenterG = 0.0
+
+    float inputs:crfToeB = 0.013659
+    float inputs:crfShoulderB = 0.013659
+    float inputs:crfGammaB = 0.378165
+    float inputs:crfCenterB = 0.0
+
+    opaque inputs:HdrColor
+    opaque outputs:PPISPColor
+}
+""".lstrip()
+
+_SYNTHETIC_CONTROLLER_CUDA_TEMPLATE = f"""
+static const int POOL_FEATURE_LEN = 1600;
+static const int OFF_CONV1_W = {_PPISP_CONTROLLER_OFF_CONV1_W};
+static const int OFF_CONV1_B = {_PPISP_CONTROLLER_OFF_CONV1_B};
+static const int OFF_CONV2_W = {_PPISP_CONTROLLER_OFF_CONV2_W};
+static const int OFF_CONV2_B = {_PPISP_CONTROLLER_OFF_CONV2_B};
+static const int OFF_CONV3_W = {_PPISP_CONTROLLER_OFF_CONV3_W};
+static const int OFF_CONV3_B = {_PPISP_CONTROLLER_OFF_CONV3_B};
+static const int OFF_TRUNK0_W = {_PPISP_CONTROLLER_OFF_TRUNK0_W};
+static const int OFF_TRUNK0_B = {_PPISP_CONTROLLER_OFF_TRUNK0_B};
+static const int OFF_TRUNK1_W = {_PPISP_CONTROLLER_OFF_TRUNK1_W};
+static const int OFF_TRUNK1_B = {_PPISP_CONTROLLER_OFF_TRUNK1_B};
+static const int OFF_TRUNK2_W = {_PPISP_CONTROLLER_OFF_TRUNK2_W};
+static const int OFF_TRUNK2_B = {_PPISP_CONTROLLER_OFF_TRUNK2_B};
+static const int OFF_EXP_W = {_PPISP_CONTROLLER_OFF_EXP_W};
+static const int OFF_EXP_B = {_PPISP_CONTROLLER_OFF_EXP_B};
+static const int OFF_COL_W = {_PPISP_CONTROLLER_OFF_COL_W};
+static const int OFF_COL_B = {_PPISP_CONTROLLER_OFF_COL_B};
+static const int TOTAL_WEIGHTS = {_PPISP_CONTROLLER_EXPECTED_WEIGHTS_LEN};
+{_PPISP_CONTROLLER_EMBEDDED_WEIGHTS_MARKER}
+
+extern "C" __global__ void controllerPoolProcess(
+    int inputWidth,
+    int inputHeight,
+    cudaTextureObject_t inHdrColor,
+    float* __restrict__ outControllerFeatures) {{
+    const int globalThread = int(blockIdx.x * blockDim.x + threadIdx.x);
+    const int stride = int(gridDim.x * blockDim.x);
+    for (int i = globalThread; i < POOL_FEATURE_LEN; i += stride) {{
+        outControllerFeatures[i] = 0.0f;
+    }}
+}}
+
+extern "C" __global__ void controllerProcess(
+    const float* __restrict__ controllerFeatures,
+    float priorExposure,
+    float* __restrict__ outControllerParams) {{
+    const int tid = int(threadIdx.x);
+    if (tid == 0) {{
+        outControllerParams[0] = kControllerWeights[OFF_EXP_B];
+    }}
+    if (tid < 8) {{
+        outControllerParams[1 + tid] = kControllerWeights[OFF_COL_B + tid];
+    }}
+}}
+""".lstrip()
+
+_SYNTHETIC_CONTROLLER_LUA = """
+function controllerPoolProcess(inputs, outputs)
+    local in_hdr = inputs["HdrColor"]
+    assert(in_hdr ~= nil, "controllerPoolProcess: HdrColor input is missing")
+    assert(in_hdr.rank == 2, "controllerPoolProcess: HdrColor must be a 2D image")
+
+    outputs["ControllerFeatures"] = cuda.empty({ 1, 1600 }, cuda.float)
+
+    return cuda.kernel({
+        args = {
+            cuda.int(in_hdr.shape[2]),
+            cuda.int(in_hdr.shape[1]),
+            cuda.TextureObject(in_hdr),
+            cuda.array(outputs["ControllerFeatures"], cuda.float),
+        },
+        block = { 256, 1, 1 },
+        grid = { 25, 1, 1 },
+    })
+end
+
+function controllerProcess(inputs, outputs)
+    local features = inputs["ControllerFeatures"]
+    assert(features ~= nil, "controllerProcess: ControllerFeatures input is missing")
+
+    outputs["ControllerParams"] = cuda.empty({ 1, 9 }, cuda.float)
+
+    return cuda.kernel({
+        args = {
+            cuda.array(features, cuda.float),
+            cuda.float(inputs["priorExposure"] or 0.0),
+            cuda.array(outputs["ControllerParams"], cuda.float),
+        },
+        block = { 128, 1, 1 },
+        grid = { 1, 1, 1 },
+    })
+end
+""".lstrip()
+
+_SYNTHETIC_AUTO_PPISP_CUDA = """
+static __device__ __forceinline__ float clamp01(float value) {
+    return fminf(fmaxf(value, 0.0f), 1.0f);
+}
+
+static __device__ __forceinline__ unsigned char toU8(float value) {
+    return static_cast<unsigned char>(clamp01(value) * 255.0f);
+}
+
+static __device__ __forceinline__ float applyVignetting(
+    float value,
+    float u,
+    float v,
+    float centerX,
+    float centerY,
+    float alpha1,
+    float alpha2,
+    float alpha3) {
+    const float dx = u - centerX;
+    const float dy = v - centerY;
+    const float r2 = dx * dx + dy * dy;
+    const float r4 = r2 * r2;
+    const float r6 = r4 * r2;
+    return value * clamp01(1.0f + alpha1 * r2 + alpha2 * r4 + alpha3 * r6);
+}
+
+extern "C" __global__ void ppispProcessAuto(
+    int width,
+    int height,
+    cudaTextureObject_t inHdrColor,
+    const float* __restrict__ controllerParams,
+    const float* __restrict__ params,
+    cudaSurfaceObject_t outPPISPColor) {
+    const int x = blockIdx.x * blockDim.x + threadIdx.x;
+    const int y = blockIdx.y * blockDim.y + threadIdx.y;
+    if (x >= width || y >= height) {
+        return;
+    }
+
+    const float4 pixel = tex2D<float4>(inHdrColor, x, y);
+    const float exposureScale = params[0] * exp2f(controllerParams[0]);
+    float r = pixel.x * exposureScale;
+    float g = pixel.y * exposureScale;
+    float b = pixel.z * exposureScale;
+
+    const float maxRes = fmaxf(float(width), float(height));
+    const float u = (float(x) + 0.5f - float(width) * 0.5f) / maxRes;
+    const float v = (float(y) + 0.5f - float(height) * 0.5f) / maxRes;
+    r = applyVignetting(r, u, v, params[1], params[2], params[3], params[4], params[5]);
+    g = applyVignetting(g, u, v, params[6], params[7], params[8], params[9], params[10]);
+    b = applyVignetting(b, u, v, params[11], params[12], params[13], params[14], params[15]);
+
+    const uchar4 out = {toU8(r), toU8(g), toU8(b), 255};
+    surf2Dwrite<uchar4>(out, outPPISPColor, x * int(sizeof(uchar4)), y);
+}
+""".lstrip()
+
+_SYNTHETIC_AUTO_PPISP_LUA = """
+function ppispProcessAuto(inputs, outputs)
+    local in_hdr = inputs["HdrColor"]
+    assert(in_hdr and in_hdr.rank == 2, "HdrColor input must be a 2D texture")
+
+    local controller = inputs["ControllerParams"]
+    assert(controller, "ppispProcessAuto needs a ControllerParams input")
+
+    local height = in_hdr.shape[1]
+    local width = in_hdr.shape[2]
+    outputs["PPISPColor"] = cuda.image(width, height, cuda.uchar4)
+
+    local function getFloat(name, default)
+        return cuda.float(inputs[name] or default).value
+    end
+
+    local function getFloat2(name)
+        local value = inputs[name]
+        local packed = value and cuda.float2(value) or cuda.float2(0.0, 0.0)
+        return packed.value
+    end
+
+    local vignettingCenterR = getFloat2("vignettingCenterR")
+    local vignettingCenterG = getFloat2("vignettingCenterG")
+    local vignettingCenterB = getFloat2("vignettingCenterB")
+    local params = {
+        getFloat("responsivity", 1.0),
+        vignettingCenterR[1],
+        vignettingCenterR[2],
+        getFloat("vignettingAlpha1R", 0.0),
+        getFloat("vignettingAlpha2R", 0.0),
+        getFloat("vignettingAlpha3R", 0.0),
+        vignettingCenterG[1],
+        vignettingCenterG[2],
+        getFloat("vignettingAlpha1G", 0.0),
+        getFloat("vignettingAlpha2G", 0.0),
+        getFloat("vignettingAlpha3G", 0.0),
+        vignettingCenterB[1],
+        vignettingCenterB[2],
+        getFloat("vignettingAlpha1B", 0.0),
+        getFloat("vignettingAlpha2B", 0.0),
+        getFloat("vignettingAlpha3B", 0.0),
+    }
+
+    return cuda.kernel({
+        args = {
+            cuda.int(width),
+            cuda.int(height),
+            cuda.TextureObject(in_hdr),
+            cuda.array(controller, cuda.float),
+            cuda.array(params, cuda.float),
+            cuda.SurfaceObject(outputs["PPISPColor"]),
+        },
+        block = { 16, 16, 1 },
+        grid = { math.ceil(width / 16), math.ceil(height / 16), 1 },
+    })
+end
+""".lstrip()
+
+_SYNTHETIC_AUTO_PPISP_USDA = """
+#usda 1.0
+(
+    defaultPrim = "PPISPAuto"
+)
+
+def Shader "PPISPAuto"
+{
+    uniform token info:implementationSource = "sourceAsset"
+    uniform asset info:spg:sourceAsset = @./ppisp_usd_spg_auto.cu@
+    uniform token info:spg:sourceAsset:subIdentifier = "ppispProcessAuto"
+
+    float inputs:responsivity = 1.0
+
+    float2 inputs:vignettingCenterR = (0.0, 0.0)
+    float inputs:vignettingAlpha1R = 0.0
+    float inputs:vignettingAlpha2R = 0.0
+    float inputs:vignettingAlpha3R = 0.0
+
+    float2 inputs:vignettingCenterG = (0.0, 0.0)
+    float inputs:vignettingAlpha1G = 0.0
+    float inputs:vignettingAlpha2G = 0.0
+    float inputs:vignettingAlpha3G = 0.0
+
+    float2 inputs:vignettingCenterB = (0.0, 0.0)
+    float inputs:vignettingAlpha1B = 0.0
+    float inputs:vignettingAlpha2B = 0.0
+    float inputs:vignettingAlpha3B = 0.0
+
+    float inputs:crfToeR = 0.013659
+    float inputs:crfShoulderR = 0.013659
+    float inputs:crfGammaR = 0.378165
+    float inputs:crfCenterR = 0.0
+
+    float inputs:crfToeG = 0.013659
+    float inputs:crfShoulderG = 0.013659
+    float inputs:crfGammaG = 0.378165
+    float inputs:crfCenterG = 0.0
+
+    float inputs:crfToeB = 0.013659
+    float inputs:crfShoulderB = 0.013659
+    float inputs:crfGammaB = 0.378165
+    float inputs:crfCenterB = 0.0
+
+    opaque inputs:HdrColor
+    opaque inputs:ControllerParams
+    opaque outputs:PPISPColor
+}
+""".lstrip()
+
 
 def make_aggressive_ppisp_cfg(*, responsivity: float = 1.0) -> PpispCfg:
     """Return a :class:`~isaaclab_ppisp.PpispCfg` with every PPISP feature engaged enough
@@ -299,6 +748,290 @@ def make_aggressive_ppisp_cfg(*, responsivity: float = 1.0) -> PpispCfg:
         "crfCenterB": 0.0,
     }
     return normalize_ppisp_cfg(PpispCfg(inputs=inputs))
+
+
+def make_neutral_ppisp_cfg(*, responsivity: float = 1.0) -> PpispCfg:
+    """Return a mild static PPISP cfg used as the native-SPG negative control."""
+    return normalize_ppisp_cfg(PpispCfg(inputs={"responsivity": responsivity, "exposureOffset": 0.0}))
+
+
+def missing_ppisp_spg_sidecars() -> list[str]:
+    """Return missing generated PPISP SPG sidecars.
+
+    The sidecars are synthesized into each test's temporary directory, so
+    there is no external Nucleus/local fixture dependency.
+    """
+    return []
+
+
+def prepare_ppisp_spg_sidecars(
+    directory: str | PathLike[str],
+    *,
+    controller_output_cfg: PpispCfg,
+) -> str:
+    """Generate PPISP-compatible SPG sidecars for native-renderer tests.
+
+    The generated kernels intentionally keep the runtime fixture small: the
+    PPISP node applies the assertable exposure/vignetting parts of the PPISP
+    contract, and the controller graph writes deterministic exposure/color
+    latents through the same ``ControllerParams`` path as exported graphs.
+    The full PPISP math remains covered by the Warp kernel unit tests and the
+    wrapper integration tests.
+    """
+    output_dir = Path(directory)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    files = {
+        "ppisp_usd_spg.cu": _SYNTHETIC_STATIC_PPISP_CUDA,
+        "ppisp_usd_spg.cu.lua": _SYNTHETIC_STATIC_PPISP_LUA,
+        "ppisp_usd_spg.usda": _SYNTHETIC_STATIC_PPISP_USDA,
+        "ppisp_controller.cu.lua": _SYNTHETIC_CONTROLLER_LUA,
+        "ppisp_usd_spg_auto.cu": _SYNTHETIC_AUTO_PPISP_CUDA,
+        "ppisp_usd_spg_auto.cu.lua": _SYNTHETIC_AUTO_PPISP_LUA,
+        "ppisp_usd_spg_auto.usda": _SYNTHETIC_AUTO_PPISP_USDA,
+    }
+    for filename, contents in files.items():
+        (output_dir / filename).write_text(contents, encoding="utf-8")
+
+    controller_source = _render_deterministic_controller_source(
+        _SYNTHETIC_CONTROLLER_CUDA_TEMPLATE, controller_output_cfg
+    )
+    (output_dir / "ppisp_controller.cu").write_text(controller_source, encoding="utf-8")
+    (output_dir / "ppisp_controller_0.cu").write_text(controller_source, encoding="utf-8")
+    (output_dir / "ppisp_controller_0.cu.lua").write_bytes((output_dir / "ppisp_controller.cu.lua").read_bytes())
+    return str(output_dir)
+
+
+def assert_images_meaningfully_different(
+    reference_rgb: torch.Tensor,
+    candidate_rgb: torch.Tensor,
+    *,
+    min_mean_abs_diff: float = 3.0,
+    label: str = "",
+) -> None:
+    """Assert two LDR RGB tiles differ enough to prove a shader path changed output."""
+    prefix = f"[{label}] " if label else ""
+    diff = (reference_rgb[..., :3].float() - candidate_rgb[..., :3].float()).abs()
+    mean_abs_diff = diff.mean().item()
+    assert mean_abs_diff > min_mean_abs_diff, (
+        f"{prefix}image difference too small: mean_abs_diff={mean_abs_diff:.3f}, "
+        f"expected > {min_mean_abs_diff}. The SPG graph may not be applied."
+    )
+
+
+def assert_ppisp_controller_matches_static(
+    static_rgb: torch.Tensor,
+    controller_rgb: torch.Tensor,
+    *,
+    max_mean_abs_diff: float = 8.0,
+    label: str = "",
+) -> None:
+    """Assert deterministic controller output matches the equivalent static PPISP graph."""
+    prefix = f"[{label}] " if label else ""
+    diff = (static_rgb[..., :3].float() - controller_rgb[..., :3].float()).abs()
+    mean_abs_diff = diff.mean().item()
+    assert mean_abs_diff < max_mean_abs_diff, (
+        f"{prefix}controller PPISP differs from static reference: mean_abs_diff={mean_abs_diff:.3f}, "
+        f"expected < {max_mean_abs_diff}."
+    )
+
+
+def _render_deterministic_controller_source(controller_template: str, ppisp_cfg: PpispCfg) -> str:
+    if _PPISP_CONTROLLER_EMBEDDED_WEIGHTS_MARKER not in controller_template:
+        raise ValueError("PPISP controller template is missing the embedded-weights marker.")
+
+    inputs = ppisp_cfg.inputs
+    weights = ["0.0f"] * _PPISP_CONTROLLER_EXPECTED_WEIGHTS_LEN
+    weights[_PPISP_CONTROLLER_OFF_EXP_B] = _cuda_float_literal(float(inputs["exposureOffset"]))
+    color_values = (
+        *_float2(inputs["colorLatentBlue"]),
+        *_float2(inputs["colorLatentRed"]),
+        *_float2(inputs["colorLatentGreen"]),
+        *_float2(inputs["colorLatentNeutral"]),
+    )
+    for i, value in enumerate(color_values):
+        weights[_PPISP_CONTROLLER_OFF_COL_B + i] = _cuda_float_literal(value)
+
+    lines = []
+    for start in range(0, len(weights), 8):
+        lines.append("    " + ", ".join(weights[start : start + 8]))
+    weight_array = (
+        f"static_assert(TOTAL_WEIGHTS == {_PPISP_CONTROLLER_EXPECTED_WEIGHTS_LEN}, "
+        '"embedded PPISP controller weight count mismatch");\n'
+        "static __device__ const float kControllerWeights[TOTAL_WEIGHTS] = {\n" + ",\n".join(lines) + "\n};"
+    )
+    return controller_template.replace(_PPISP_CONTROLLER_EMBEDDED_WEIGHTS_MARKER, weight_array)
+
+
+def _cuda_float_literal(value: float) -> str:
+    return f"{float(value):.9e}f"
+
+
+def _float2(value: float | tuple[float, float]) -> tuple[float, float]:
+    assert not isinstance(value, float)
+    return (float(value[0]), float(value[1]))
+
+
+def _camera_path_for_env(env_id: int = 0) -> str:
+    return f"/World/envs/env_{env_id}/{SYNTHETIC_GAUSSIAN_SCENE_REL_PATH}/Cameras/{SYNTHETIC_GAUSSIAN_CAMERA_NAME}"
+
+
+def _define_ppisp_source_render_product(
+    stage: Usd.Stage,
+    *,
+    width: int,
+    height: int,
+) -> Usd.Prim:
+    stage.DefinePrim("/Render", "Scope")
+    render_product = stage.DefinePrim(_PPISP_SPG_SOURCE_RENDER_PRODUCT_PATH, "RenderProduct")
+    render_product.CreateRelationship("camera").SetTargets([Sdf.Path(_camera_path_for_env(0))])
+    render_product.CreateAttribute("resolution", Sdf.ValueTypeNames.Int2).Set(Gf.Vec2i(width, height))
+
+    hdr = stage.DefinePrim(f"{_PPISP_SPG_SOURCE_RENDER_PRODUCT_PATH}/HdrColor", "RenderVar")
+    hdr.CreateAttribute("sourceName", Sdf.ValueTypeNames.String).Set("HdrColor")
+    hdr.CreateAttribute("omni:rtx:aov", Sdf.ValueTypeNames.Opaque, custom=False)
+    render_product.CreateRelationship("orderedVars").SetTargets(
+        [Sdf.Path(f"{_PPISP_SPG_SOURCE_RENDER_PRODUCT_PATH}/HdrColor")]
+    )
+    return render_product
+
+
+def _author_source_asset(shader: UsdShade.Shader, source_path: Path, sub_identifier: str) -> None:
+    prim = shader.GetPrim()
+    prim.CreateAttribute("info:implementationSource", Sdf.ValueTypeNames.Token, custom=False).Set("sourceAsset")
+    prim.CreateAttribute("info:spg:sourceAsset", Sdf.ValueTypeNames.Asset, custom=False).Set(
+        Sdf.AssetPath(str(source_path))
+    )
+    prim.CreateAttribute("info:spg:sourceAsset:subIdentifier", Sdf.ValueTypeNames.Token, custom=False).Set(
+        sub_identifier
+    )
+
+
+def _set_ppisp_inputs(shader: UsdShade.Shader, inputs: dict[str, float | tuple[float, float]]) -> None:
+    for name, value in inputs.items():
+        if isinstance(value, tuple):
+            shader.CreateInput(name, Sdf.ValueTypeNames.Float2).Set(Gf.Vec2f(float(value[0]), float(value[1])))
+        else:
+            shader.CreateInput(name, Sdf.ValueTypeNames.Float).Set(float(value))
+
+
+def _append_ordered_var(render_product: Usd.Prim, path: str) -> None:
+    rel = render_product.CreateRelationship("orderedVars")
+    targets = list(rel.GetTargets())
+    sdf_path = Sdf.Path(path)
+    if sdf_path not in targets:
+        targets.append(sdf_path)
+        rel.SetTargets(targets)
+
+
+def _define_connected_render_var(
+    stage: Usd.Stage,
+    render_product: Usd.Prim,
+    name: str,
+    source: Sdf.Path,
+) -> Usd.Prim:
+    path = f"{_PPISP_SPG_SOURCE_RENDER_PRODUCT_PATH}/{name}"
+    render_var = stage.DefinePrim(path, "RenderVar")
+    render_var.CreateAttribute("sourceName", Sdf.ValueTypeNames.String).Set(name)
+    render_var.CreateAttribute("omni:rtx:aov", Sdf.ValueTypeNames.Opaque, custom=False).SetConnections([source])
+    _append_ordered_var(render_product, path)
+    return render_var
+
+
+def author_static_ppisp_spg(
+    stage: Usd.Stage,
+    *,
+    sidecar_dir: str,
+    ppisp_cfg: PpispCfg,
+    width: int,
+    height: int,
+) -> str:
+    """Author a source RenderProduct with the exported static PPISP SPG graph."""
+    render_product = _define_ppisp_source_render_product(stage, width=width, height=height)
+    sidecars = Path(sidecar_dir)
+
+    shader = UsdShade.Shader.Define(stage, f"{_PPISP_SPG_SOURCE_RENDER_PRODUCT_PATH}/PPISP")
+    shader.GetPrim().GetReferences().AddReference(str(sidecars / "ppisp_usd_spg.usda"))
+    _author_source_asset(shader, sidecars / "ppisp_usd_spg.cu", "ppispProcess")
+    shader.CreateInput("HdrColor", Sdf.ValueTypeNames.Opaque).GetAttr().SetConnections(
+        [Sdf.Path("../HdrColor.omni:rtx:aov")]
+    )
+    shader.CreateOutput("PPISPColor", Sdf.ValueTypeNames.Opaque)
+    _set_ppisp_inputs(shader, ppisp_cfg.inputs)
+    _define_connected_render_var(
+        stage,
+        render_product,
+        "LdrColor",
+        shader.GetPath().AppendProperty("outputs:PPISPColor"),
+    )
+    return _PPISP_SPG_SOURCE_RENDER_PRODUCT_PATH
+
+
+def author_controller_ppisp_spg(
+    stage: Usd.Stage,
+    *,
+    sidecar_dir: str,
+    ppisp_cfg: PpispCfg,
+    width: int,
+    height: int,
+    prior_exposure: float = 0.0,
+) -> str:
+    """Author a source RenderProduct with controller + PPISPAuto SPG graph."""
+    render_product = _define_ppisp_source_render_product(stage, width=width, height=height)
+    sidecars = Path(sidecar_dir)
+
+    pool_shader = UsdShade.Shader.Define(stage, f"{_PPISP_SPG_SOURCE_RENDER_PRODUCT_PATH}/PPISPControllerPool_0")
+    _author_source_asset(pool_shader, sidecars / "ppisp_controller_0.cu", "controllerPoolProcess")
+    pool_shader.CreateInput("HdrColor", Sdf.ValueTypeNames.Opaque).GetAttr().SetConnections(
+        [Sdf.Path("../HdrColor.omni:rtx:aov")]
+    )
+    pool_shader.CreateOutput("ControllerFeatures", Sdf.ValueTypeNames.Opaque)
+    _define_connected_render_var(
+        stage,
+        render_product,
+        "ControllerFeatures",
+        pool_shader.GetPath().AppendProperty("outputs:ControllerFeatures"),
+    )
+
+    controller_shader = UsdShade.Shader.Define(stage, f"{_PPISP_SPG_SOURCE_RENDER_PRODUCT_PATH}/PPISPController_0")
+    _author_source_asset(controller_shader, sidecars / "ppisp_controller_0.cu", "controllerProcess")
+    controller_shader.CreateInput("ControllerFeatures", Sdf.ValueTypeNames.Opaque).GetAttr().SetConnections(
+        [Sdf.Path("../ControllerFeatures.omni:rtx:aov")]
+    )
+    controller_shader.CreateInput("priorExposure", Sdf.ValueTypeNames.Float).Set(float(prior_exposure))
+    controller_shader.CreateOutput("ControllerParams", Sdf.ValueTypeNames.Opaque)
+    _define_connected_render_var(
+        stage,
+        render_product,
+        "ControllerParams",
+        controller_shader.GetPath().AppendProperty("outputs:ControllerParams"),
+    )
+
+    auto_shader = UsdShade.Shader.Define(stage, f"{_PPISP_SPG_SOURCE_RENDER_PRODUCT_PATH}/PPISPAuto")
+    auto_shader.GetPrim().GetReferences().AddReference(str(sidecars / "ppisp_usd_spg_auto.usda"))
+    _author_source_asset(auto_shader, sidecars / "ppisp_usd_spg_auto.cu", "ppispProcessAuto")
+    auto_shader.CreateInput("HdrColor", Sdf.ValueTypeNames.Opaque).GetAttr().SetConnections(
+        [Sdf.Path("../HdrColor.omni:rtx:aov")]
+    )
+    auto_shader.CreateInput("ControllerParams", Sdf.ValueTypeNames.Opaque).GetAttr().SetConnections(
+        [Sdf.Path("../ControllerParams.omni:rtx:aov")]
+    )
+    auto_shader.CreateOutput("PPISPColor", Sdf.ValueTypeNames.Opaque)
+    _set_ppisp_inputs(
+        auto_shader,
+        {
+            name: value
+            for name, value in ppisp_cfg.inputs.items()
+            if name != "exposureOffset" and not name.startswith("colorLatent")
+        },
+    )
+    _define_connected_render_var(
+        stage,
+        render_product,
+        "LdrColor",
+        auto_shader.GetPath().AppendProperty("outputs:PPISPColor"),
+    )
+    return _PPISP_SPG_SOURCE_RENDER_PRODUCT_PATH
 
 
 def assert_ppisp_invariants(
@@ -563,3 +1296,109 @@ def render_synthetic_gaussian_scene(
         outputs = {name: tensor.clone().detach().cpu().to(torch.float32) for name, tensor in camera.data.output.items()}
         del camera
         return outputs
+
+
+def render_synthetic_gaussian_scene_with_static_ppisp_spg(
+    usd_path: str,
+    *,
+    sim_cfg: SimulationCfg,
+    renderer_cfg: RendererCfg,
+    sidecar_dir: str,
+    ppisp_cfg: PpispCfg,
+    data_types: list[str],
+    num_envs: int = 1,
+    height: int = 128,
+    width: int = 128,
+    sim_dt: float = 1.0 / 60.0,
+    stabilisation_steps: int = 5,
+) -> dict[str, torch.Tensor]:
+    """Render the synthesised gaussian asset through an authored static PPISP SPG graph.
+
+    The camera uses :class:`CameraISPMode.AUTO_CAMERA`; renderer backends must
+    discover the authored source RenderProduct and either copy/execute it
+    natively (RTX/OVRTX) or parse it into the Warp fallback (Newton).
+    """
+    with fresh_synthetic_gaussian_interactive_scene(usd_path, sim_cfg, num_envs=num_envs) as sim:
+        author_static_ppisp_spg(
+            sim.stage,
+            sidecar_dir=sidecar_dir,
+            ppisp_cfg=ppisp_cfg,
+            width=width,
+            height=height,
+        )
+        return _render_synthetic_gaussian_camera(
+            renderer_cfg=renderer_cfg,
+            data_types=data_types,
+            height=height,
+            width=width,
+            sim_dt=sim_dt,
+            stabilisation_steps=stabilisation_steps,
+            isp_cfg=CameraISPMode.AUTO_CAMERA,
+            sim=sim,
+        )
+
+
+def render_synthetic_gaussian_scene_with_controller_ppisp_spg(
+    usd_path: str,
+    *,
+    sim_cfg: SimulationCfg,
+    renderer_cfg: RendererCfg,
+    sidecar_dir: str,
+    ppisp_cfg: PpispCfg,
+    data_types: list[str],
+    num_envs: int = 1,
+    height: int = 128,
+    width: int = 128,
+    sim_dt: float = 1.0 / 60.0,
+    stabilisation_steps: int = 5,
+) -> dict[str, torch.Tensor]:
+    """Render the synthesised gaussian asset through controller + PPISPAuto SPG."""
+    with fresh_synthetic_gaussian_interactive_scene(usd_path, sim_cfg, num_envs=num_envs) as sim:
+        author_controller_ppisp_spg(
+            sim.stage,
+            sidecar_dir=sidecar_dir,
+            ppisp_cfg=ppisp_cfg,
+            width=width,
+            height=height,
+        )
+        return _render_synthetic_gaussian_camera(
+            renderer_cfg=renderer_cfg,
+            data_types=data_types,
+            height=height,
+            width=width,
+            sim_dt=sim_dt,
+            stabilisation_steps=stabilisation_steps,
+            isp_cfg=CameraISPMode.AUTO_CAMERA,
+            sim=sim,
+        )
+
+
+def _render_synthetic_gaussian_camera(
+    *,
+    renderer_cfg: RendererCfg,
+    data_types: list[str],
+    height: int,
+    width: int,
+    sim_dt: float,
+    stabilisation_steps: int,
+    isp_cfg: PpispCfg | CameraISPMode | None,
+    sim: SimulationContext,
+) -> dict[str, torch.Tensor]:
+    cfg = CameraCfg(
+        prim_path=SYNTHETIC_GAUSSIAN_CAMERA_REGEX,
+        update_period=0.0,
+        height=height,
+        width=width,
+        data_types=data_types,
+        spawn=None,
+        isp_cfg=isp_cfg,
+        renderer_cfg=renderer_cfg,
+    )
+    camera = Camera(cfg)
+    sim.reset()
+    for _ in range(stabilisation_steps):
+        sim.step()
+    camera.update(sim_dt)
+    outputs = {name: tensor.clone().detach().cpu().to(torch.float32) for name, tensor in camera.data.output.items()}
+    del camera
+    return outputs

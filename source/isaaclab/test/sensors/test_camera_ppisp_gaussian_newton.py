@@ -52,10 +52,15 @@ if not _MISSING_MODULES:
 
     from generate_synthetic_gaussian_asset import (  # noqa: E402
         SYNTHETIC_GAUSSIAN_CAMERA_REGEX,
+        assert_ppisp_controller_matches_static,
         assert_ppisp_invariants,
         assert_ppisp_lifts_exposure,
+        make_aggressive_ppisp_cfg,
         make_synthetic_gaussian_usd,
+        prepare_ppisp_spg_sidecars,
         render_synthetic_gaussian_scene,
+        render_synthetic_gaussian_scene_with_controller_ppisp_spg,
+        render_synthetic_gaussian_scene_with_static_ppisp_spg,
     )
     from isaaclab_newton.physics.mjwarp_manager_cfg import MJWarpSolverCfg  # noqa: E402
     from isaaclab_newton.physics.newton_manager_cfg import NewtonCfg  # noqa: E402
@@ -65,10 +70,15 @@ if not _MISSING_MODULES:
 else:
     tempfile = None
     SYNTHETIC_GAUSSIAN_CAMERA_REGEX = None
+    assert_ppisp_controller_matches_static = None
     assert_ppisp_invariants = None
     assert_ppisp_lifts_exposure = None
+    make_aggressive_ppisp_cfg = None
     make_synthetic_gaussian_usd = None
+    prepare_ppisp_spg_sidecars = None
     render_synthetic_gaussian_scene = None
+    render_synthetic_gaussian_scene_with_controller_ppisp_spg = None
+    render_synthetic_gaussian_scene_with_static_ppisp_spg = None
     SimulationCfg = None
     MJWarpSolverCfg = None
     NewtonCfg = None
@@ -84,6 +94,10 @@ def _newton_sim_cfg(device: str) -> SimulationCfg:
         physics=NewtonCfg(solver_cfg=MJWarpSolverCfg(), num_substeps=1),
         device=device,
     )
+
+
+def _prepare_ppisp_spg_sidecars(tmpdir: str, ppisp_cfg) -> str:
+    return prepare_ppisp_spg_sidecars(f"{tmpdir}/ppisp_spg", controller_output_cfg=ppisp_cfg)
 
 
 @pytest.mark.parametrize("device", ["cuda:0"])
@@ -112,6 +126,39 @@ def test_camera_ppisp_wrapper_signatures_on_synthetic_gaussians_newton(device):
         )
     assert_ppisp_lifts_exposure(output["rgb_hdr"][0], output["rgb"][0], label="newton_warp")
     assert_ppisp_invariants(output["rgb"][0], label="newton_warp")
+
+
+@pytest.mark.parametrize("device", ["cuda:0"])
+@pytest.mark.isaacsim_ci
+@_SKIP_MISSING_NEWTON
+def test_camera_ppisp_controller_matches_static_warp_on_synthetic_gaussians_newton(device):
+    """Newton Warp controller output must match the equivalent static PPISP graph."""
+    with tempfile.TemporaryDirectory(prefix="isaaclab-synth-gauss-") as tmpdir:
+        asset_path = make_synthetic_gaussian_usd(f"{tmpdir}/synthetic_gaussians.usda")
+        ppisp_cfg = make_aggressive_ppisp_cfg(responsivity=50.0)
+        sidecar_dir = _prepare_ppisp_spg_sidecars(tmpdir, ppisp_cfg)
+
+        static = render_synthetic_gaussian_scene_with_static_ppisp_spg(
+            asset_path,
+            sim_cfg=_newton_sim_cfg(device),
+            renderer_cfg=NewtonWarpRendererCfg(),
+            sidecar_dir=sidecar_dir,
+            ppisp_cfg=ppisp_cfg,
+            data_types=["rgb", "rgb_hdr"],
+            sim_dt=SIM_DT,
+        )
+        controller = render_synthetic_gaussian_scene_with_controller_ppisp_spg(
+            asset_path,
+            sim_cfg=_newton_sim_cfg(device),
+            renderer_cfg=NewtonWarpRendererCfg(),
+            sidecar_dir=sidecar_dir,
+            ppisp_cfg=ppisp_cfg,
+            data_types=["rgb", "rgb_hdr"],
+            sim_dt=SIM_DT,
+        )
+
+    assert_ppisp_controller_matches_static(static["rgb"][0], controller["rgb"][0], label="newton_warp controller")
+    assert_ppisp_invariants(controller["rgb"][0], label="newton_warp controller")
 
 
 @pytest.mark.parametrize("device", ["cuda:0"])

@@ -6,11 +6,14 @@
 """Tests for the OVRTX renderer output contract."""
 
 import importlib.util
+import types
 
 import pytest
 import torch
 import warp as wp
+from isaaclab_ppisp import PpispCfg
 
+from isaaclab.renderers.camera_render_spec import CameraRenderSpec
 from isaaclab.sensors.camera import CameraCfg
 from isaaclab.sensors.camera.camera_data import CameraData, RenderBufferKind, RenderBufferSpec
 from isaaclab.sim import PinholeCameraCfg
@@ -66,6 +69,74 @@ def _make_ovrtx_renderer_without_backend() -> OVRTXRenderer:
     renderer = OVRTXRenderer.__new__(OVRTXRenderer)
     renderer.cfg = OVRTXRendererCfg()
     return renderer
+
+
+def test_ovrtx_renderer_config_enables_spg(monkeypatch):
+    """OVRTX must set its SPG config bit so /rtx/spg/enabled is true in the native renderer."""
+    from isaaclab_ov.renderers import ovrtx_renderer
+
+    captured_config = {}
+
+    class FakeRendererConfig:
+        def __init__(self, **kwargs):
+            captured_config.update(kwargs)
+
+    class FakeRenderer:
+        def __init__(self, config):
+            self.config = config
+
+    monkeypatch.setattr(ovrtx_renderer, "RendererConfig", FakeRendererConfig)
+    monkeypatch.setattr(ovrtx_renderer, "Renderer", FakeRenderer)
+
+    cfg = OVRTXRendererCfg()
+    cfg.use_ovrtx_cloning = False
+    renderer = OVRTXRenderer(cfg)
+
+    assert renderer._renderer
+    assert captured_config["enable_spg"] is True
+
+
+def test_ovrtx_prepare_cameras_reloads_non_native_ppisp_for_warp(monkeypatch):
+    """Non-native PPISP must be resolved with controller weights for Warp fallback."""
+    import isaaclab_ppisp
+
+    requested_cfg = object()
+    native_resolved_cfg = PpispCfg()
+    full_resolved_cfg = PpispCfg(inputs={"exposureOffset": 1.0})
+    calls = []
+    exposure_overrides = []
+
+    def resolve_native(isp_cfg, stage, camera_prim_path):
+        calls.append(("native", isp_cfg, stage, camera_prim_path))
+        return native_resolved_cfg
+
+    def resolve_full(isp_cfg, stage, camera_prim_path):
+        calls.append(("full", isp_cfg, stage, camera_prim_path))
+        return full_resolved_cfg
+
+    monkeypatch.setattr(isaaclab_ppisp, "resolve_and_normalize_for_native_spg", resolve_native)
+    monkeypatch.setattr(isaaclab_ppisp, "resolve_and_normalize", resolve_full)
+    monkeypatch.setattr(
+        isaaclab_ppisp,
+        "apply_rtx_exposure_overrides",
+        lambda stage, camera_paths: exposure_overrides.append((stage, camera_paths)),
+    )
+
+    stage = object()
+    spec = types.SimpleNamespace(
+        cfg=types.SimpleNamespace(isp_cfg=requested_cfg),
+        camera_prim_paths=("/World/Camera",),
+    )
+    renderer = OVRTXRenderer.__new__(OVRTXRenderer)
+
+    renderer.prepare_cameras(stage, spec)
+
+    assert spec.cfg.isp_cfg is full_resolved_cfg
+    assert calls == [
+        ("native", requested_cfg, stage, "/World/Camera"),
+        ("full", requested_cfg, stage, "/World/Camera"),
+    ]
+    assert exposure_overrides == [(stage, ["/World/Camera"])]
 
 
 def test_ovrtx_supported_output_types_key_set():
@@ -161,6 +232,26 @@ def test_ovrtx_set_outputs_routes_ppisp_buffers_through_warp_buffers():
     assert "rgb_hdr" in render_data.warp_buffers
     assert render_data.warp_buffers["rgb_hdr"].shape == (2, 8, 16, 3)
     assert render_data.warp_buffers["rgb_hdr"].dtype is wp.float32
+
+
+def test_ovrtx_render_data_uses_native_spg_without_warp_pipeline():
+    cfg = _make_camera_cfg(["rgb"])
+    cfg.isp_cfg = PpispCfg(
+        spg_render_product_prim_path="/Render/Source",
+    )
+    spec = CameraRenderSpec(
+        cfg=cfg,
+        device="cpu",
+        num_instances=2,
+        camera_prim_paths=("/World/envs/env_0/Camera", "/World/envs/env_1/Camera"),
+        view_count=2,
+        camera_path_relative_to_env_0="Camera",
+    )
+
+    render_data = OVRTXRenderData(spec, "cpu")
+
+    assert render_data.ppisp_pipeline is None
+    assert render_data.data_types == ["rgb"]
 
 
 def test_ovrtx_process_frame_skips_ldr_rgba_when_ppisp_is_active():

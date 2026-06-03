@@ -56,9 +56,10 @@ from .ovrtx_renderer_kernels import (
     sync_newton_transforms_kernel,
 )
 from .ovrtx_usd import (
-    build_render_product_as_string,
+    build_render_product_on_stage,
     create_scene_partition_attributes,
     export_stage_to_string,
+    stage_from_string,
 )
 
 if TYPE_CHECKING:
@@ -122,9 +123,12 @@ class OVRTXRenderData:
         # ``isp_cfg`` is already fully normalised by the time it reaches here (Camera does it).
         self.ppisp_pipeline: PpispPipeline | None = None
         if spec.cfg.isp_cfg is not None:
-            from isaaclab_ppisp import PpispPipeline
+            from isaaclab_ppisp import ppisp_uses_native_spg
 
-            self.ppisp_pipeline = PpispPipeline(spec.cfg.isp_cfg)
+            if not ppisp_uses_native_spg(spec.cfg.isp_cfg):
+                from isaaclab_ppisp import PpispPipeline
+
+                self.ppisp_pipeline = PpispPipeline(spec.cfg.isp_cfg)
 
 
 class OVRTXRenderer(BaseRenderer):
@@ -185,6 +189,7 @@ class OVRTXRenderer(BaseRenderer):
             log_level=self.cfg.log_level,
             read_gpu_transforms=True,
             keep_system_alive=True,
+            enable_spg=True,
         )
         self._renderer = Renderer(OVRTX_CONFIG)
         if not self._renderer:
@@ -198,17 +203,27 @@ class OVRTXRenderer(BaseRenderer):
         """Resolve the camera's PPISP cfg and apply OVRTX-specific USD overrides.
 
         First resolves ``spec.cfg.isp_cfg`` (sentinel discovery + normalization)
-        via :func:`isaaclab_ppisp.resolve_and_normalize` so :mod:`isaaclab` does
-        not need to know about PPISP. Then, when an ISP is configured, pins
-        ``exposure:*`` to neutral and applies ``OmniRtxCameraExposureAPI_1`` so
-        the RTX exposure model OVRTX embeds does not compound on top of the
-        ISP. Without an ISP, the camera prim's authored exposure is left alone.
+        for OVRTX's native-SPG path so controller sidecar weights are not parsed
+        unnecessarily. If the resolved graph cannot run natively, resolves again
+        with controller weights loaded for the Warp fallback. Then, when an ISP
+        is configured, pins ``exposure:*`` to neutral and applies
+        ``OmniRtxCameraExposureAPI_1`` so the RTX exposure model OVRTX embeds
+        does not compound on top of the ISP. Without an ISP, the camera prim's
+        authored exposure is left alone.
         """
         if not spec.camera_prim_paths:
             return
-        from isaaclab_ppisp import apply_rtx_exposure_overrides, resolve_and_normalize
+        from isaaclab_ppisp import (
+            apply_rtx_exposure_overrides,
+            ppisp_uses_native_spg,
+            resolve_and_normalize,
+            resolve_and_normalize_for_native_spg,
+        )
 
-        spec.cfg.isp_cfg = resolve_and_normalize(spec.cfg.isp_cfg, stage, spec.camera_prim_paths[0])
+        isp_cfg = resolve_and_normalize_for_native_spg(spec.cfg.isp_cfg, stage, spec.camera_prim_paths[0])
+        if isp_cfg is not None and not ppisp_uses_native_spg(isp_cfg):
+            isp_cfg = resolve_and_normalize(spec.cfg.isp_cfg, stage, spec.camera_prim_paths[0])
+        spec.cfg.isp_cfg = isp_cfg
         if spec.cfg.isp_cfg is None:
             return
         apply_rtx_exposure_overrides(stage, list(spec.camera_prim_paths))
@@ -237,7 +252,10 @@ class OVRTXRenderer(BaseRenderer):
         height = spec.cfg.height
         num_envs = spec.num_instances
         data_types = spec.cfg.data_types if spec.cfg.data_types else ["rgb"]
-        if spec.cfg.isp_cfg is not None and "rgb_hdr" not in data_types:
+        from isaaclab_ppisp import PPISP_SHADER_NAMES, copy_ppisp_spg_to_render_product, ppisp_uses_native_spg
+
+        uses_native_ppisp_spg = ppisp_uses_native_spg(spec.cfg.isp_cfg)
+        if spec.cfg.isp_cfg is not None and not uses_native_ppisp_spg and "rgb_hdr" not in data_types:
             data_types = [*data_types, "rgb_hdr"]
 
         env_0_prefix = "/World/envs/env_0/"
@@ -249,17 +267,35 @@ class OVRTXRenderer(BaseRenderer):
         if self._exported_usd_string is not None:
             logger.info("Injecting camera definitions...")
 
-            render_product_string, render_product_path = build_render_product_as_string(
+            temp_stage = stage_from_string(self._exported_usd_string)
+            render_product_path = build_render_product_on_stage(
+                stage=temp_stage,
                 width=width,
                 height=height,
                 num_envs=num_envs,
                 data_types=data_types,
                 minimal_mode=_resolve_rtx_minimal_mode(data_types),
                 camera_rel_path=self._camera_rel_path,
+                render_product_name="IsaacLabRenderProduct",
             )
+            if uses_native_ppisp_spg:
+                if spec.cfg.isp_cfg.spg_render_product_prim_path is None:
+                    raise RuntimeError("Native PPISP SPG cfg is missing its source RenderProduct prim path.")
+                copy_ppisp_spg_to_render_product(
+                    temp_stage,
+                    spec.cfg.isp_cfg.spg_render_product_prim_path,
+                    render_product_path,
+                )
+                if not any(
+                    temp_stage.GetPrimAtPath(f"{render_product_path}/{shader_name}").IsValid()
+                    for shader_name in PPISP_SHADER_NAMES
+                ):
+                    raise RuntimeError(
+                        "Failed to copy native PPISP SPG graph from "
+                        f"'{spec.cfg.isp_cfg.spg_render_product_prim_path}' to '{render_product_path}'."
+                    )
+            combined_usd_string = export_stage_to_string(temp_stage, num_envs, self._use_ovrtx_cloning)
             self._render_product_paths.append(render_product_path)
-
-            combined_usd_string = self._exported_usd_string + "\n\n" + render_product_string
             self._exported_usd_string = None  # Free memory
 
             # If temp_usd_dir is set, write the combined USD stage to a temporary file.
