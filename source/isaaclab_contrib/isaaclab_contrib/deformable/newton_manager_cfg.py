@@ -7,7 +7,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from isaaclab_newton.physics import FeatherstoneSolverCfg, MJWarpSolverCfg, NewtonSolverCfg
 
@@ -161,6 +161,15 @@ class CoupledFeatherstoneVBDSolverCfg(NewtonSolverCfg):
 
     kinematic_velocity_limit_scale: float = 1.0
     """Velocity-limit multiplier used when converting position targets to kinematic joint velocities."""
+
+    kinematic_joint_drive_mode: Literal["velocity", "position"] = "velocity"
+    """Joint target source used by kinematic coupling.
+
+    - ``"velocity"``: use ``control.joint_target_vel`` directly. This preserves
+      the original kinematic-mode behavior.
+    - ``"position"``: convert ``control.joint_target_pos`` to bounded joint
+      velocities. This is useful for IsaacLab relative joint-position actions.
+    """
 
 
 @configclass
