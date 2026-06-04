@@ -278,6 +278,11 @@ class NewtonCoupledMJWarpVBDManager(NewtonManager):
 
         valid = set(inspect.signature(SolverVBD.__init__).parameters) - {"self", "model"}
         kwargs = {k: v for k, v in solver_cfg.soft_solver_cfg.to_dict().items() if k in valid}
+        soft_contact_max = (
+            NewtonManager._collision_cfg.soft_contact_max if NewtonManager._collision_cfg is not None else None
+        )
+        if soft_contact_max is not None and "soft_contact_max" in valid:
+            kwargs["soft_contact_max"] = soft_contact_max
         cls._soft_solver = SolverVBD(model, **kwargs)
 
         # Dummy solver for the newtonmanager

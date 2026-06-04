@@ -159,6 +159,9 @@ class CoupledFeatherstoneVBDSolverCfg(NewtonSolverCfg):
     - ``"two_way"``: Same-substep two-way coupling with normal + Coulomb friction.
     """
 
+    kinematic_velocity_limit_scale: float = 1.0
+    """Velocity-limit multiplier used when converting position targets to kinematic joint velocities."""
+
 
 @configclass
 class NewtonModelCfg:

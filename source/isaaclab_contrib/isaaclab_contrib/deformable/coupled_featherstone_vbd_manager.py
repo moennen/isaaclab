@@ -25,7 +25,7 @@ from .deformable_object import (
     install_deformable_builder_hooks,
     setup_registered_deformable_fabric_sync,
 )
-from .kernels import _kernel_body_particle_reaction
+from .kernels import _kernel_body_particle_reaction, _kernel_position_target_to_velocity
 from .newton_manager_cfg import CoupledFeatherstoneVBDSolverCfg
 
 if TYPE_CHECKING:
@@ -45,6 +45,7 @@ class NewtonCoupledFeatherstoneVBDManager(NewtonManager):
     _rigid_solver: SolverFeatherstone
     _soft_solver: SolverVBD
     _coupling_mode: str | None = None
+    _kinematic_velocity_limit_scale: float = 1.0
 
     @classmethod
     def initialize(cls, sim_context: SimulationContext) -> None:
@@ -278,6 +279,11 @@ class NewtonCoupledFeatherstoneVBDManager(NewtonManager):
 
         valid = set(inspect.signature(SolverVBD.__init__).parameters) - {"self", "model"}
         kwargs = {k: v for k, v in solver_cfg.soft_solver_cfg.to_dict().items() if k in valid}
+        soft_contact_max = (
+            NewtonManager._collision_cfg.soft_contact_max if NewtonManager._collision_cfg is not None else None
+        )
+        if soft_contact_max is not None and "soft_contact_max" in valid:
+            kwargs["soft_contact_max"] = soft_contact_max
         cls._soft_solver = SolverVBD(model, **kwargs)
 
         # Dummy solver for the newtonmanager
@@ -287,6 +293,7 @@ class NewtonCoupledFeatherstoneVBDManager(NewtonManager):
         NewtonManager._needs_collision_pipeline = True
 
         if solver_cfg.coupling_mode == "kinematic":
+            cls._kinematic_velocity_limit_scale = solver_cfg.kinematic_velocity_limit_scale
             cls._gravity_zero = wp.zeros(1, dtype=wp.vec3)
             cls._gravity_saved = wp.clone(model.gravity)
             # Save original PD gains and create zeroed versions for kinematic step
@@ -349,8 +356,21 @@ class NewtonCoupledFeatherstoneVBDManager(NewtonManager):
         model.joint_target_ke.assign(cls._ke_zero)
         model.joint_target_kd.assign(cls._kd_zero)
 
-        # Assign joint velocities from control targets
-        state_in.joint_qd.assign(control.joint_target_vel)
+        # Assign joint velocities from position targets. IsaacLab's relative
+        # joint-position actions write joint_target_pos, while Newton's
+        # deformable examples drive kinematic rigid stepping through qd.
+        wp.launch(
+            _kernel_position_target_to_velocity,
+            dim=model.joint_dof_count,
+            inputs=[
+                state_in.joint_q,
+                control.joint_target_pos,
+                model.joint_velocity_limit,
+                1.0 / dt,
+                cls._kinematic_velocity_limit_scale,
+                state_in.joint_qd,
+            ],
+        )
 
         cls._rigid_solver.step(state_in, state_out, control, None, dt)
 

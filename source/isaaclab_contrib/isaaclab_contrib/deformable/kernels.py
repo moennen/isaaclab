@@ -382,3 +382,21 @@ def _kernel_body_particle_reaction(
             torque[2],
         ),
     )
+
+
+@wp.kernel
+def _kernel_position_target_to_velocity(
+    joint_q: wp.array(dtype=float),
+    joint_target_pos: wp.array(dtype=float),
+    joint_velocity_limit: wp.array(dtype=float),
+    inv_dt: float,
+    velocity_limit_scale: float,
+    joint_qd: wp.array(dtype=float),
+):
+    """Convert position targets to bounded velocities for kinematic rigid stepping."""
+    index = wp.tid()
+    velocity = (joint_target_pos[index] - joint_q[index]) * inv_dt
+    limit = wp.abs(joint_velocity_limit[index]) * velocity_limit_scale
+    if limit > 0.0:
+        velocity = wp.clamp(velocity, -limit, limit)
+    joint_qd[index] = velocity
