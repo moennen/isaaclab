@@ -3,5 +3,4 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-from .dexsuite_deformable import *
-from .reach import *
+"""Agent configurations for the experimental deformable Dexsuite tasks."""

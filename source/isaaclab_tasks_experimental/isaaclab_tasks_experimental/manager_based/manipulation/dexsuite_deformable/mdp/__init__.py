@@ -3,5 +3,8 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-from .dexsuite_deformable import *
-from .reach import *
+"""MDP terms for the experimental Kuka/Allegro deformable lift task."""
+
+from isaaclab.utils.module import lazy_export
+
+lazy_export()
