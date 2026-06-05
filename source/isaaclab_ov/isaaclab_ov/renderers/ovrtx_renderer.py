@@ -84,9 +84,9 @@ _PPISP_IMPORT_ERROR_MESSAGE = (
 
 
 def _raise_missing_ppisp_error(exc: ModuleNotFoundError) -> NoReturn:
-    if exc.name != "isaaclab_ppisp":
+    if exc.name != "isaaclab_ppisp" and not (exc.name and exc.name.startswith("isaaclab_ppisp.")):
         raise exc
-    raise ModuleNotFoundError(_PPISP_IMPORT_ERROR_MESSAGE) from exc
+    raise ModuleNotFoundError(_PPISP_IMPORT_ERROR_MESSAGE, name="isaaclab_ppisp") from exc
 
 
 def _resolve_rtx_minimal_mode(data_types: list[str]) -> int | None:
@@ -131,7 +131,7 @@ class OVRTXRenderData:
         self.num_rows = math.ceil(self.num_envs / self.num_cols)
         self.warp_buffers: dict[str, wp.array] = {}
         # Post-render PPISP pipeline composed when ``spec.cfg.isp_cfg`` is set.
-        # ``isp_cfg`` is already fully normalised by the time it reaches here (Camera does it).
+        # ``isp_cfg`` is already fully normalized by ``prepare_cameras`` by the time it reaches here.
         self.ppisp_pipeline: PpispPipeline | None = None
         if spec.cfg.isp_cfg is not None:
             try:

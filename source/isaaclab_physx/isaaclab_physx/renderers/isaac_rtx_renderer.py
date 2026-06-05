@@ -46,9 +46,9 @@ _PPISP_IMPORT_ERROR_MESSAGE = (
 
 
 def _raise_missing_ppisp_error(exc: ModuleNotFoundError) -> NoReturn:
-    if exc.name != "isaaclab_ppisp":
+    if exc.name != "isaaclab_ppisp" and not (exc.name and exc.name.startswith("isaaclab_ppisp.")):
         raise exc
-    raise ModuleNotFoundError(_PPISP_IMPORT_ERROR_MESSAGE) from exc
+    raise ModuleNotFoundError(_PPISP_IMPORT_ERROR_MESSAGE, name="isaaclab_ppisp") from exc
 
 
 # RTX simple-shading constants.
