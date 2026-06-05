@@ -69,7 +69,16 @@ def test_uv_run_base_dependencies_cover_newton_rsl_rl_training():
 
     assert "isaaclab-newton[all]" in dependencies
     assert "isaaclab-physx[newton]" in dependencies
+    assert "isaaclab-ppisp" in dependencies
     assert "isaaclab-rl[rsl-rl]" in dependencies
+
+
+def test_uv_run_maps_ppisp_to_local_source():
+    """The local PPISP peer extension must not resolve from the package registry."""
+    uv_sources = _root_pyproject()["tool"]["uv"]["sources"]
+
+    assert uv_sources["isaaclab-ppisp"]["path"] == "source/isaaclab_ppisp"
+    assert uv_sources["isaaclab-ppisp"]["editable"] is True
 
 
 def test_uv_run_uses_managed_python():
