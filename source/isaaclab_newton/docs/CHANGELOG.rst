@@ -1,6 +1,16 @@
 Changelog
 ---------
 
+0.15.2 (2026-06-06)
+~~~~~~~~~~~~~~~~~~~
+
+Added
+^^^^^
+
+* Added a ``NewtonManager.get_contacts()`` accessor so visualizers can render
+  Newton contact buffers without reaching into manager internals.
+
+
 0.15.1 (2026-06-05)
 ~~~~~~~~~~~~~~~~~~~
 

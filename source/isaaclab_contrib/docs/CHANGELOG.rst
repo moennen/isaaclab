@@ -1,6 +1,16 @@
 Changelog
 ---------
 
+0.4.4 (2026-06-06)
+~~~~~~~~~~~~~~~~~~
+
+Fixed
+^^^^^
+
+* Fixed RLinf optional dependency installation on DGX Spark and aarch64 by
+  replacing ``decord`` with ``decord2`` in the ``rlinf`` extras.
+
+
 0.4.3 (2026-06-05)
 ~~~~~~~~~~~~~~~~~~
 
